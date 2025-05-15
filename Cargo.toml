@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+comrak = "0.39.0"
 gix-protocol = { version = "0.48.0", features = ["blocking-client", "handshake"] }
 gix-transport = { version = "0.45.0", features = ["http-client-reqwest-rust-tls"] }
 gix-url = "0.29.0"
