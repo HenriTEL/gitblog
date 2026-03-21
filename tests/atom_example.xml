@@ -1,0 +1,165 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+	<id>ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbQ==</id>
+	<title>The latest news from HenriTEL</title>
+	<updated>2025-09-10T10:59:39+02:00</updated>
+	<author>
+		<name>HenriTEL</name>
+	</author>
+	<link href="https://blog.henritel.com" />
+	<generator uri="https://lkiesow.github.io/python-feedgen" version="0.9.0">python-feedgen</generator>
+	<logo>https://blog.henritel.com/media/favicon.svg</logo>
+	<subtitle>The latest news from HenriTEL</subtitle>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2VtYmVkZGVkLXN5c3RlbXMtbGV2ZWwtMQ==</id>
+		<title>Embedded Systems Level 1</title>
+		<updated>2025-05-16T16:17:35+02:00</updated>
+		<link href="https://blog.henritel.com/tech/embedded-systems-level-1" rel="alternate" />
+		<summary>I'm doing my first embedded systems project with an ESP32 board.
+			This blog series covers my learnings on the way.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2VtYmVkZGVkLXN5c3RlbXMtbGV2ZWwtMg==</id>
+		<title>Embedded Systems Level 2</title>
+		<updated>2025-05-23T09:50:05+02:00</updated>
+		<link href="https://blog.henritel.com/tech/embedded-systems-level-2" rel="alternate" />
+		<summary>I'm doing my first embedded systems project with an ESP32 board.
+			This blog series covers my learnings on the way.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2FzeW5jaW8tdnMtbXVsdGl0aHJlYWRpbmctdnMtbXVsdGlwcm9jZXNzaW5n</id>
+		<title>AsyncIO vs Multi Threading vs Multi Processing</title>
+		<updated>2024-08-31T19:44:31+02:00</updated>
+		<link href="https://blog.henritel.com/tech/asyncio-vs-multithreading-vs-multiprocessing"
+			rel="alternate" />
+		<summary>Those are the 3 big options to speed up python code.
+			The globally accepted answer on the internet focuses on resources bound to help you
+			decide.
+			I think inter task dependencies and code complexity should also be taken into account.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2VuZy1mYWlsdXJlcy1hbmQtbWl0aWdhdGlvbnM=</id>
+		<title>Awful Software Engineering Failures And How To Prevent Them</title>
+		<updated>2024-09-17T00:04:25+02:00</updated>
+		<link href="https://blog.henritel.com/tech/eng-failures-and-mitigations" rel="alternate" />
+		<summary>Testimonials of some of the most awful Engineering failures and general principles
+			to avoid them.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL21pZ3JhdGlvbi1nYXBzLWFuZC1ob3ctdG8tcHJldmVudC10aGVt</id>
+		<title>Migration gaps and how to prevent them</title>
+		<updated>2023-09-28T17:55:13+02:00</updated>
+		<link href="https://blog.henritel.com/tech/migration-gaps-and-how-to-prevent-them"
+			rel="alternate" />
+		<summary>A retrospective on 2 migrations that went a bit wrong.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2EtbWluaW1hbGlzdC1ibG9n</id>
+		<title>GitBlog2, my minimalist blog generator</title>
+		<updated>2023-05-13T21:03:29+00:00</updated>
+		<link href="https://blog.henritel.com/tech/a-minimalist-blog" rel="alternate" />
+		<summary>How I spent weekends developping a blog generator instead of actually starting a
+			blog.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS90ZWNoL2NvbW1pdGxpbnQtYmFk</id>
+		<title>Commitlint: sounds good, doesn't work</title>
+		<updated>2024-07-22T16:58:54+02:00</updated>
+		<link href="https://blog.henritel.com/tech/commitlint-bad" rel="alternate" />
+		<summary>Conventinal Commits aka commitlint is just pain and suffering.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9yYW50L3doeS1ub3QtZ29sYW5n</id>
+		<title>Reasons to Not Use the Go Programming Language</title>
+		<updated>2024-11-15T13:50:32+01:00</updated>
+		<link href="https://blog.henritel.com/rant/why-not-golang" rel="alternate" />
+		<summary>Some of the reasons that makes go a no go.</summary>
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9yYW50L2FuZHJvaWQtc3Vja3Mtb24tZ29vZ2xlLXBob25lcw==</id>
+		<title>Android Sucks on Google Phones</title>
+		<updated>2024-11-01T11:11:30+01:00</updated>
+		<link href="https://blog.henritel.com/rant/android-sucks-on-google-phones" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9pLXJlY29tbWVuZA==</id>
+		<title>I Recommend</title>
+		<updated>2024-10-30T08:13:01+01:00</updated>
+		<link href="https://blog.henritel.com/i-recommend" rel="alternate" />
+		<summary>A list of unpopular things that are above their competition.</summary>
+	</entry>
+	<entry>
+		<id>ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvbG9jYWwtZG9tYWlu</id>
+		<title>.local Domain Name</title>
+		<updated>2023-10-06T16:30:10+02:00</updated>
+		<link href="https://blog.henritel.com/TIL/local-domain" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvYXBpZ2F0ZXdheS1pcy1ub3QtY29tcGxpYW50LXdpdGgtb3BlbmFwaQ==</id>
+		<title>AWS ApiGateway Is Not Compliant With OpenAPI Specs</title>
+		<updated>2025-01-15T12:56:28+01:00</updated>
+		<link href="https://blog.henritel.com/TIL/apigateway-is-not-compliant-with-openapi"
+			rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvaWNvbnMtdGhlLW1vZGVybi13YXk=</id>
+		<title>Icons the modern way</title>
+		<updated>2023-10-02T11:46:41+02:00</updated>
+		<link href="https://blog.henritel.com/TIL/icons-the-modern-way" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvbmF0dXJhbC1qb2luLWRvZXMtbm90LWpvaW4td2l0aC10aGUtcHJpbWF0eS1rZXk=</id>
+		<title>NATURAL JOIN Does Not Join On The Primary Key</title>
+		<updated>2025-02-06T15:20:13+01:00</updated>
+		<link href="https://blog.henritel.com/TIL/natural-join-does-not-join-with-the-primaty-key"
+			rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvc3RyYW5nZS1weXRob24tYmVoYXZpb3Jz</id>
+		<title>Strange Behaviors with Python</title>
+		<updated>2024-04-18T14:35:44+02:00</updated>
+		<link href="https://blog.henritel.com/TIL/strange-python-behaviors" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvZGItcXVlcnktcGFnaW5hdGlvbg==</id>
+		<title>Implement Pagination</title>
+		<updated>2025-01-15T13:04:16+01:00</updated>
+		<link href="https://blog.henritel.com/TIL/db-query-pagination" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>
+			ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvcHl0aG9uLXByb3RvY29s</id>
+		<title>Python Protocol</title>
+		<updated>2024-10-14T09:45:59+02:00</updated>
+		<link href="https://blog.henritel.com/TIL/python-protocol" rel="alternate" />
+		<summary />
+	</entry>
+	<entry>
+		<id>ni://blog.henritel.com/base64;aHR0cHM6Ly9ibG9nLmhlbnJpdGVsLmNvbS9USUwvZW50cm9weQ==</id>
+		<title>Entropy</title>
+		<updated>2024-10-14T11:04:09+02:00</updated>
+		<link href="https://blog.henritel.com/TIL/entropy" rel="alternate" />
+		<summary />
+	</entry>
+</feed>

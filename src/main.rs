@@ -1,44 +1,68 @@
 use std::{error::Error, fs};
 
-use gix_protocol::handshake::Ref;
-use gix_protocol::ls_refs;
-use gix_url::Url;
-use gix_transport::bstr::BStr;
-use gix_transport::client::http;
-use prodash::progress;
+use gitblog::atom_feed;
+
+use clap::Parser;
 use comrak::{markdown_to_html_with_plugins, Plugins, plugins, Options};
+use gix::bstr::BStr;
+use log::error;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let url = BStr::new("https://github.com/GitoxideLabs/gitoxide");
-    let gix_url = Url::from_bytes(url)?;
-
-    let mut transport = http::connect(gix_url, gix_transport::Protocol::default(), false);
-    gix_protocol::handshake(
-        &mut transport,
-        gix_transport::Service::UploadPack,
-        &mut |_| Ok(None),
-        vec![],
-        &mut progress::Discard,
-    )?;
-    let refs = ls_refs(
-        &mut transport,
-        &gix_transport::client::Capabilities::default(),
-        |_, _, _| Ok(ls_refs::Action::Continue),
-        &mut progress::Discard,
-        false,
-    )?;
-
-    for ref_ in refs.iter().take(10) {
-        match ref_ {
-            Ref::Direct { full_ref_name, .. } => println!("{}", full_ref_name),
-            _ => (),
-        };
-    }
-    readme_to_html();
-
-    Ok(())
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct CliArgs {
+    /// Path or URL of the git repository containing the blog sources
+    repo: String,
+    /// Branch on the git repository to use
+    #[arg(long, default_value = "main")]
+    branch: String,
+    /// URL where your blog is hosted
+    #[arg(long)]
+    blog_url: Option<String>,
 }
 
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let args = CliArgs::parse();
+
+    let up_to = if let Some(ref blog_url) = args.blog_url {
+        fetch_atom_feed(blog_url)
+            .expect("failed to fetch atom feed")
+            .updated
+    } else {
+        chrono::DateTime::<chrono::Utc>::MIN_UTC.fixed_offset()
+    };
+    // hello_gix(up_to);
+    
+    let url = gix::Url::from_bytes(BStr::new(args.repo.as_bytes())).expect("built git url");
+    match url.scheme {
+        gix::url::Scheme::Http | gix::url::Scheme::Https => {
+            let remote = gitblog::git::GitRemote { url, branch: args.branch };
+            remote.fetch(&up_to);
+        },
+        _ => error!("The URL {} resolved to protocol {} which is not supported.", url, url.scheme), // TODO exit failure
+    }
+
+    // let remote = gitblog::git::GitRemote::new(&args.repo_uri, &args.branch)
+    //     .expect("invalid repository URI");
+
+    // let changes = remote.changes_since(&up_to).expect("failed to compute changes");
+
+    // let mut paths: Vec<_> = changes.iter().collect();
+    // paths.sort_by_key(|(p, _)| p.as_path());
+    // for (path, state) in paths {
+    //     println!("{:?}  {}", state, path.display());
+    // }
+}
+
+fn fetch_atom_feed(blog_url: &str) -> Result<atom_feed::Feed, Box<dyn Error>> {
+    let url = format!("{}/atom.xml", blog_url.trim_end_matches('/'));
+    let body = reqwest::blocking::get(&url)?.error_for_status()?.text()?;
+    let feed = atom_feed::parse(&body)?;
+    Ok(feed)
+}
 
 fn readme_to_html() {
     let file_path = "README.md";
