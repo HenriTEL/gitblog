@@ -1,5 +1,4 @@
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use comrak::{Options, markdown_to_html};
 
