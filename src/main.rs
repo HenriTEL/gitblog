@@ -1,6 +1,6 @@
-use std::{error::Error, fs};
+use std::{error::Error, fs, path::Path};
 
-use gitblog::{atom_feed, git::State};
+use gitblog::{atom_feed, git::State, html::markdown_file_to_html};
 
 use clap::Parser;
 use comrak::{markdown_to_html_with_plugins, Plugins, plugins, Options};
@@ -56,7 +56,10 @@ fn main() {
                 }
             }).collect::<Vec<_>>();
             let dest = remote.get_files(&updated_file_blobs, None).expect("fetch blobs");
-            println!("blobs fetched to {}", dest.display());
+            for fb in updated_file_blobs {
+                let full_path = dest.join(&fb.file_path);
+                markdown_file_to_html(&full_path);
+            }
         },
         _ => error!("The URL {} resolved to protocol {} which is not supported.", url, url.scheme), // TODO exit failure
     }
@@ -78,6 +81,27 @@ fn fetch_atom_feed(blog_url: &str) -> Result<atom_feed::Feed, Box<dyn Error>> {
     let body = reqwest::blocking::get(&url)?.error_for_status()?.text()?;
     let feed = atom_feed::parse(&body)?;
     Ok(feed)
+}
+
+fn convert_markdown_files_recursively(root: &Path) {
+    if root.is_file() {
+        if root.extension().is_some_and(|ext| ext == "md") {
+            markdown_file_to_html(root);
+        }
+        return;
+    }
+
+    let entries = match root.read_dir() {
+        Ok(entries) => entries,
+        Err(err) => {
+            error!("Failed to read {}: {}", root.display(), err);
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        convert_markdown_files_recursively(&entry.path());
+    }
 }
 
 fn readme_to_html() {
