@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gix::bstr::{BString, ByteSlice};
@@ -58,9 +58,68 @@ fn cached_tree(oid: &gix::ObjectId) -> Option<Tree> {
     TREE_CACHE.with(|cache| cache.borrow().get(oid).cloned())
 }
 
-impl GitRemote {
+/// Write every file under `tree_oid` (recursive) into `dest_root`, using objects from a decoded pack.
+fn write_tree_from_pack_store(
+    store: &HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>,
+    dest_root: &Path,
+    tree_oid: &gix::ObjectId,
+    relative: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (kind, data) = store
+        .get(tree_oid)
+        .ok_or_else(|| format!("tree {} not in pack", tree_oid))?;
+    if !matches!(kind, gix::objs::Kind::Tree) {
+        return Err(format!("expected tree object, got {:?}", kind).into());
+    }
+    let tree_ref = TreeRef::from_bytes(data.as_slice())?;
+    let tree = Tree::from(tree_ref);
+    for entry in &tree.entries {
+        let path = relative.join(entry.filename.to_str_lossy().as_ref());
+        if entry.mode.is_tree() {
+            let dir_at = dest_root.join(&path);
+            fs::create_dir_all(&dir_at)?;
+            write_tree_from_pack_store(store, dest_root, &entry.oid, &path)?;
+        } else if entry.mode.is_blob()
+            || entry.mode.is_executable()
+            || entry.mode.is_link()
+        {
+            let (bk, blob) = store
+                .get(&entry.oid)
+                .ok_or_else(|| format!("blob {} not in pack", entry.oid))?;
+            if !matches!(bk, gix::objs::Kind::Blob) {
+                return Err(format!("expected blob object, got {:?}", bk).into());
+            }
+            let out_path = dest_root.join(&path);
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(out_path, blob.as_slice())?;
+        }
+    }
+    Ok(())
+}
 
-    pub fn get_files(
+fn checkout_commit_into_dest(
+    store: &HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>,
+    dest: &Path,
+    commit_oid: gix::ObjectId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (kind, data) = store
+        .get(&commit_oid)
+        .ok_or_else(|| format!("commit {} not in pack", commit_oid))?;
+    if !matches!(kind, gix::objs::Kind::Commit) {
+        return Err(format!("expected commit object, got {:?}", kind).into());
+    }
+    let commit = CommitRef::from_bytes(data.as_slice())?;
+    let tree_oid = commit.tree();
+    write_tree_from_pack_store(store, dest, &tree_oid, Path::new(""))
+}
+
+impl GitRemote {
+    /// Fetch the files from the remote repository and write them to the destination directory.
+    /// If the destination is not provided, a temporary directory will be created.
+    /// Return the destination directory.
+    pub fn pull_files(
         &self,
         blobs: &[FileBlob],
         destination: Option<PathBuf>,
@@ -71,9 +130,7 @@ impl GitRemote {
         };
         fs::create_dir_all(&dest)?;
 
-        if blobs.is_empty() {
-            return Ok(dest);
-        }
+        let mut tip_commit_oid: Option<gix::ObjectId> = None;
 
         let mut transport = http::connect(
             self.url.clone(),
@@ -92,8 +149,37 @@ impl GitRemote {
         let fetch_features =
             Command::Fetch.default_features(outcome.server_protocol_version, &outcome.capabilities);
         let mut args = fetch::Arguments::new(outcome.server_protocol_version, fetch_features, false);
-        for blob in blobs {
-            args.want(blob.oid);
+        if blobs.len() > 0 {
+            for blob in blobs {
+                args.want(blob.oid);
+            }
+        } else {
+            let prefix = BString::new(format!("ref-prefix refs/heads/{}", self.branch).into());
+            let refs = ls_refs(
+                &mut transport,
+                &outcome.capabilities,
+                |_caps, args, _features| {
+                    args.push(prefix);
+                    Ok(ls_refs::Action::Continue)
+                },
+                &mut progress::Discard,
+                false,
+            ).expect("ls_refs command");
+
+            let target_ref = format!("refs/heads/{}", self.branch);
+            let head_oid = refs
+                .iter()
+                .find_map(|r| match r {
+                    Ref::Direct { full_ref_name, object, .. }
+                        if *full_ref_name == target_ref.as_bytes() => Some(*object),
+                    _ => None,
+                })
+                .expect(&format!("{} not found", target_ref));
+            tip_commit_oid = Some(head_oid);
+            args.want(head_oid);
+            if args.can_use_shallow() {
+                args.deepen(1);
+            }
         }
 
         let mut reader = args.send(&mut transport, true)?;
@@ -151,7 +237,7 @@ impl GitRemote {
             let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, out.as_slice());
             decoded_objects.borrow_mut().insert(oid, (kind, out.clone()));
 
-            if matches!(kind, gix::objs::Kind::Blob) {
+            if !requested.is_empty() && matches!(kind, gix::objs::Kind::Blob) {
                 if let Some(path) = requested.get(&oid) {
                     let output_path = dest.join(path);
                     if let Some(parent) = output_path.parent() {
@@ -159,11 +245,7 @@ impl GitRemote {
                     }
                     fs::write(output_path, out.as_slice())?;
                     written.insert(oid, true);
-                } else {
-                    println!("blob object not requested: {:?}", oid);
                 }
-            } else {
-                println!("non-blob object: {:?}", kind);
             }
 
             let mut entry_payload = vec![0u8; entry.decompressed_size as usize];
@@ -172,16 +254,24 @@ impl GitRemote {
             offset = entry.pack_offset() + entry.header_size() as u64 + consumed as u64;
         }
 
-        for blob in blobs {
-            if !written.contains_key(&blob.oid) {
-                return Err(format!("blob {} not found in fetched pack", blob.oid).into());
+        if blobs.is_empty() {
+            let tip = tip_commit_oid.ok_or("branch tip OID missing for full checkout")?;
+            let store = decoded_objects.borrow();
+            checkout_commit_into_dest(&store, &dest, tip)?;
+        } else {
+            for oid in requested.keys() {
+                if !written.contains_key(oid) {
+                    return Err(format!("blob {} not found in fetched pack", oid).into());
+                }
             }
         }
 
         Ok(dest)
     }
 
-    pub fn fetch(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
+    /// Fetch changes since the given date and time.
+    /// Return the Tree objects corresponding to the up_to and head commits.
+    pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
         let mut transport = http::connect(self.url.clone(), gix::protocol::transport::Protocol::default(), true);
 
         // Capture handshake outcome: we need server_protocol_version and capabilities
@@ -207,18 +297,6 @@ impl GitRemote {
             false,
         ).expect("ls_refs command");
 
-
-    // let refs = ls_refs(
-    //     &mut transport,
-    //     &outcome.capabilities,
-    //     |_caps, args, _features| {
-    //         args.push(b"ref-prefix refs/heads/main".into());
-    //         Ok(ls_refs::Action::Continue)
-    //     },
-    //     &mut progress::Discard,
-    //     false,
-    // ).expect("ls_refs command");
-
         let target_ref = format!("refs/heads/{}", self.branch);
         let head_oid = refs
             .iter()
@@ -228,8 +306,6 @@ impl GitRemote {
                 _ => None,
             })
             .expect(&format!("{} not found", target_ref));
-
-        println!("{}: {head_oid}", target_ref);
 
         // Command::Fetch.default_features() reads the server capabilities to build
         // the feature list that Arguments::new needs to gate can_use_shallow() etc.
@@ -249,16 +325,14 @@ impl GitRemote {
         // Fall back to deepen(1) for the MIN_UTC sentinel (no blog_url given) –
         // its timestamp is ≈ -8.3e12, which GitHub rejects as invalid.
         let ts = up_to.timestamp();
-        if ts > 0 && args.can_use_deepen_since() {
+        if args.can_use_deepen_since() {
             args.deepen_since(ts);
-            println!("Using deepen_since: {}", up_to);
+            // Skip all blob objects to reduce pack size.
+            if args.can_use_filter() {
+                args.filter("blob:none");
+            }
         } else if args.can_use_shallow() {
             args.deepen(1);
-            println!("Using depth 1");
-        }
-        // blob:none: skip all blob objects to reduce pack size.
-        if args.can_use_filter() {
-            args.filter("blob:none");
         }
 
         // Set add_done_argument so no negotiation rounds needed.
@@ -303,6 +377,7 @@ impl GitRemote {
         let decoded_objects: RefCell<HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>> =
             RefCell::new(HashMap::new());
 
+        let mut commits_count: i32 = 0;
         for _ in 0..pack.num_objects() {
             let entry = pack.entry(offset).expect("read pack entry at offset");
             let mut out = Vec::new();
@@ -340,6 +415,7 @@ impl GitRemote {
                     head_tree_id = Some(commit_tree_id);
                 }
                 up_to_tree_id = Some(commit_tree_id);
+                commits_count += 1;
             } else if matches!(kind, gix::objs::Kind::Tree) {
                 let tree_ref = TreeRef::from_bytes(out.as_slice()).expect("parse tree");
                 let tree = Tree::from(tree_ref);
@@ -362,17 +438,21 @@ impl GitRemote {
             offset = entry.pack_offset() + entry.header_size() as u64 + consumed as u64;
         }
 
+        println!("Fetched {} commits", commits_count);
+
         TreeEnds {
             up_to_tree: up_to_tree.expect("up_to tree object was not found in pack"),
             head_tree: head_tree.expect("head tree object was not found in pack"),
         }
     }
 
+    /// Compute the difference between two trees.
+    /// Return a map of file paths to their state and the OID of the new file if it was created or modified.
     pub fn tree_diff(
         &self,
         from: &Tree,
         to: &Tree,
-    ) -> Result<HashMap<PathBuf, (State, Option<gix::ObjectId>)>, Box<dyn std::error::Error>> {
+    ) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)> {
         let mut result: HashMap<PathBuf, (State, Option<gix::ObjectId>)> = HashMap::new();
         let mut queue: VecDeque<(PathBuf, Option<Tree>, Option<Tree>)> = VecDeque::new();
         queue.push_back((PathBuf::new(), Some(from.clone()), Some(to.clone())));
@@ -475,6 +555,6 @@ impl GitRemote {
             }
         }
 
-        Ok(result)
+        result
     }
 }

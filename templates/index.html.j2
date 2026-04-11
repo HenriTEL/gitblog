@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  {% include "head_common.html.j2" %}
+  {%- for type, path in feeds %}
+  <link href="{{path}}" type="application/{{type}}+xml" rel="alternate" title="Sitewide {{type}} feed" />
+  {%- endfor %}
+</head>
+
+<body>
+  <header>
+    {% if blog_posts | length > 0 %}
+    {% set author_name = blog_posts[0].author %}
+    {% include "navbar.html.j2" %}
+    {% endif %}
+  </header>
+
+  <main>
+    {%- for blog_post in blog_posts | sort(attribute="creation_dt", reverse=true) %}
+    <article>
+      <strong><a href="/{{ blog_post.relative_path }}">{{ blog_post.title }}</a></strong>
+      <p>
+      {{ blog_post.description }}
+      </p>
+      <small>
+        Last updated on {{ blog_post.human_time }}
+      </small>
+    </article>
+    {%- endfor %}
+  </main>
+  {% if blog_posts | length > 0 %}
+  {% set author_name = blog_posts[0].author %}
+  {% include "footer.html.j2" %}
+  {% endif %}
+</body>
+
+</html>
