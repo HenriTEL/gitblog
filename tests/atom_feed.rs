@@ -1,4 +1,4 @@
-use gitblog::atom_feed::parse;
+use gitblog::feed::parse;
 use std::path::Path;
 
 #[test]

@@ -52,10 +52,15 @@ pub struct FileBlob {
 
 thread_local! {
     static TREE_CACHE: RefCell<HashMap<gix::ObjectId, Tree>> = RefCell::new(HashMap::new());
+    static BLOB_TIMESTAMPS: RefCell<HashMap<gix::ObjectId, DateTime<FixedOffset>>> = RefCell::new(HashMap::new());
 }
 
 fn cached_tree(oid: &gix::ObjectId) -> Option<Tree> {
     TREE_CACHE.with(|cache| cache.borrow().get(oid).cloned())
+}
+
+pub fn blob_timestamp(oid: &gix::ObjectId) -> Option<DateTime<FixedOffset>> {
+    BLOB_TIMESTAMPS.with(|ts| ts.borrow().get(oid).copied())
 }
 
 /// Write every file under `tree_oid` (recursive) into `dest_root`, using objects from a decoded pack.
@@ -378,6 +383,8 @@ impl GitRemote {
             RefCell::new(HashMap::new());
 
         let mut commits_count: i32 = 0;
+        let mut commit_infos: Vec<(gix::ObjectId, DateTime<FixedOffset>)> = Vec::new();
+
         for _ in 0..pack.num_objects() {
             let entry = pack.entry(offset).expect("read pack entry at offset");
             let mut out = Vec::new();
@@ -411,6 +418,13 @@ impl GitRemote {
             if matches!(kind, gix::objs::Kind::Commit) {
                 let commit = CommitRef::from_bytes(out.as_slice()).expect("parse commit");
                 let commit_tree_id = commit.tree();
+                let time = commit.committer.time;
+                let offset = FixedOffset::east_opt(time.offset)
+                    .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+                let dt = DateTime::from_timestamp(time.seconds, 0)
+                    .expect("valid commit timestamp")
+                    .with_timezone(&offset);
+                commit_infos.push((commit_tree_id, dt));
                 if head_tree_id.is_none() {
                     head_tree_id = Some(commit_tree_id);
                 }
@@ -439,6 +453,26 @@ impl GitRemote {
         }
 
         println!("Fetched {} commits", commits_count);
+
+        for i in 0..commit_infos.len() {
+            let (tree_oid, commit_dt) = &commit_infos[i];
+            let Some(current_tree) = cached_tree(tree_oid) else { continue };
+            let parent_tree = if i + 1 < commit_infos.len() {
+                cached_tree(&commit_infos[i + 1].0)
+            } else {
+                None
+            };
+            let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
+            let diff = self.tree_diff(&from, &current_tree);
+            BLOB_TIMESTAMPS.with(|ts| {
+                let mut map = ts.borrow_mut();
+                for (_, (state, maybe_oid)) in &diff {
+                    if let (State::Created | State::Modified, Some(oid)) = (state, maybe_oid) {
+                        map.entry(*oid).or_insert(*commit_dt);
+                    }
+                }
+            });
+        }
 
         TreeEnds {
             up_to_tree: up_to_tree.expect("up_to tree object was not found in pack"),

@@ -1,6 +1,6 @@
 use std::{error::Error, path::Path};
 
-use gitblog::{atom_feed, git::State, html::markdown_file_to_html};
+use gitblog::{feed, git::State, html::markdown_file_to_html, static_content::write_static_content};
 
 use clap::Parser;
 use gix::bstr::BStr;
@@ -31,20 +31,22 @@ fn main() {
     //     .init();
 
     let args = CliArgs::parse();
-    let up_to = if args.full {
-        MIN_UTC.fixed_offset()
+    let atom_feed = fetch_atom_feed(&args.blog_url);
+    let (up_to, mut feed) = if args.full {
+        (MIN_UTC.fixed_offset(), atom_feed.ok())
     } else {
-        match fetch_atom_feed(&args.blog_url) {
-            Ok(feed) => feed.updated,
+        match atom_feed {
+            Ok(feed) => {
+                let updated = feed.updated;
+                (updated, Some(feed))
+            }
             Err(_) => {
                 log::error!("Failed to fetch atom feed from {}", args.blog_url);
                 log::info!("Falling back to full blog generation");
-                MIN_UTC.fixed_offset()
+                (MIN_UTC.fixed_offset(), None)
             }
         }
     };
-
-    // hello_gix(up_to);
     
     let url = gix::Url::from_bytes(BStr::new(args.repo.as_bytes())).expect("build git url");
     match url.scheme {
@@ -66,8 +68,49 @@ fn main() {
                     }
                 }).collect::<Vec<_>>()
             };
+            if let Some(ref mut feed) = feed {
+                let mut max_updated = feed.updated;
+                for blob in &updated_file_blobs {
+                    if let Some(ts) = gitblog::git::blob_timestamp(&blob.oid) {
+                        if ts > max_updated {
+                            max_updated = ts;
+                        }
+                        let rel_html = blob.file_path.with_extension("html")
+                            .to_string_lossy().to_string();
+                        let entry_url = format!(
+                            "{}/{}",
+                            args.blog_url.trim_end_matches('/'),
+                            rel_html
+                        );
+                        if let Some(entry) = feed.entries.iter_mut().find(|e| e.link.href == entry_url) {
+                            entry.updated = ts;
+                        } else {
+                            let title = blob.file_path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("post")
+                                .to_string();
+                            feed.entries.push(feed::Entry {
+                                id: entry_url.clone(),
+                                title,
+                                updated: ts,
+                                link: feed::Link { href: entry_url, rel: "alternate".to_string() },
+                                summary: String::new(),
+                            });
+                        }
+                    }
+                }
+                feed.updated = max_updated;
+            }
             let dest = remote.pull_files(&updated_file_blobs, None).expect("fetch blobs");
             render_markdown_files(&dest);
+            if let Some(ref feed) = feed {
+                let xml = feed::generate(feed).expect("generate atom feed");
+                std::fs::write(dest.join("atom.xml"), &xml).expect("write atom feed");
+                println!("wrote atom.xml");
+            }
+            if up_to == MIN_UTC.fixed_offset() {
+                write_static_content(&dest);
+            }
             println!("Blog built at {} ", dest.display());
         },
         _ => error!("The URL {} resolved to protocol {} which is not supported.", url, url.scheme), // TODO exit failure
@@ -98,9 +141,9 @@ fn render_markdown_files(dest: &Path) {
     walk(dest, dest);
 }
 
-fn fetch_atom_feed(blog_url: &str) -> Result<atom_feed::Feed, Box<dyn Error>> {
+fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
     let url = format!("{}/atom.xml", blog_url.trim_end_matches('/'));
     let body = reqwest::blocking::get(&url)?.error_for_status()?.text()?;
-    let feed = atom_feed::parse(&body)?;
+    let feed = feed::parse(&body)?;
     Ok(feed)
 }

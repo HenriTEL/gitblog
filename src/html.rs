@@ -94,6 +94,7 @@ pub fn render_index_html(
 /// Converts a Markdown file to a full HTML page using the embedded article template.
 pub fn markdown_file_to_html(markdown_path: &Path) {
     let md_content = std::fs::read_to_string(markdown_path).expect("read markdown");
+    // TODO: use git commit times
     let (created, modified) = file_times(markdown_path);
 
     let fallback_title = markdown_path
@@ -126,6 +127,7 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
     options.extension.strikethrough = true;
     options.extension.table = true;
     options.extension.tasklist = true;
+    options.extension.alerts = true;
 
     let main_content = markdown_to_html(&md_content, &options);
 
