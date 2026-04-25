@@ -143,7 +143,7 @@ fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
 fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
     for entry in &feed.entries {
         let path = source_path_from_entry_url(blog_url, &entry.link.href);
-        let post = BlogPost::from_atom(
+        let post = BlogPost::from_source(
             path.clone(),
             entry.title.clone(),
             entry.summary.clone(),
