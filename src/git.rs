@@ -21,6 +21,8 @@ use chrono::{DateTime, FixedOffset};
 use gix::url::Url;
 use tempfile::NamedTempFile;
 
+use crate::blog_post::BlogPost;
+
 /// Whether and how a file changed relative to the base state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
@@ -52,15 +54,80 @@ pub struct FileBlob {
 
 thread_local! {
     static TREE_CACHE: RefCell<HashMap<gix::ObjectId, Tree>> = RefCell::new(HashMap::new());
-    static BLOB_TIMESTAMPS: RefCell<HashMap<gix::ObjectId, DateTime<FixedOffset>>> = RefCell::new(HashMap::new());
+    static BLOB_BLOG_POSTS: RefCell<HashMap<gix::ObjectId, BlogPost>> = RefCell::new(HashMap::new());
+    static PATH_BLOG_POSTS: RefCell<HashMap<PathBuf, BlogPost>> = RefCell::new(HashMap::new());
+    static PATH_TO_BLOB: RefCell<HashMap<PathBuf, gix::ObjectId>> = RefCell::new(HashMap::new());
 }
 
 fn cached_tree(oid: &gix::ObjectId) -> Option<Tree> {
     TREE_CACHE.with(|cache| cache.borrow().get(oid).cloned())
 }
 
-pub fn blob_timestamp(oid: &gix::ObjectId) -> Option<DateTime<FixedOffset>> {
-    BLOB_TIMESTAMPS.with(|ts| ts.borrow().get(oid).copied())
+pub fn blob_blog_post(oid: &gix::ObjectId) -> Option<BlogPost> {
+    BLOB_BLOG_POSTS.with(|posts| posts.borrow().get(oid).cloned())
+}
+
+pub fn blob_blog_post_by_path(path: &Path) -> Option<BlogPost> {
+    let by_oid = PATH_TO_BLOB.with(|index| index.borrow().get(path).copied());
+    if let Some(oid) = by_oid {
+        return blob_blog_post(&oid);
+    }
+    PATH_BLOG_POSTS.with(|posts| posts.borrow().get(path).cloned())
+}
+
+pub fn update_blog_post_from_atom(path: PathBuf, post: BlogPost) {
+    if let Some(oid) = PATH_TO_BLOB.with(|index| index.borrow().get(&path).copied()) {
+        BLOB_BLOG_POSTS.with(|posts| {
+            posts.borrow_mut().insert(oid, post.clone());
+        });
+    }
+    PATH_BLOG_POSTS.with(|posts| {
+        posts.borrow_mut().insert(path, post);
+    });
+}
+
+pub fn update_blog_post_from_markdown(oid: &gix::ObjectId, markdown: &str) {
+    BLOB_BLOG_POSTS.with(|posts| {
+        if let Some(post) = posts.borrow_mut().get_mut(oid) {
+            post.update_from_markdown(markdown);
+            PATH_BLOG_POSTS.with(|path_posts| {
+                path_posts
+                    .borrow_mut()
+                    .insert(post.path.clone(), post.clone());
+            });
+        }
+    });
+}
+
+pub fn update_blog_post_from_markdown_path(
+    path: PathBuf,
+    markdown: &str,
+    last_updated: DateTime<FixedOffset>,
+) {
+    let maybe_oid = PATH_TO_BLOB.with(|index| index.borrow().get(&path).copied());
+    let mut post = blob_blog_post_by_path(&path).unwrap_or_else(|| BlogPost::with_defaults(path.clone(), last_updated));
+    post.last_updated = last_updated;
+    post.update_from_markdown(markdown);
+
+    PATH_BLOG_POSTS.with(|posts| {
+        posts.borrow_mut().insert(path.clone(), post.clone());
+    });
+
+    if let Some(oid) = maybe_oid {
+        BLOB_BLOG_POSTS.with(|posts| {
+            posts.borrow_mut().insert(oid, post);
+        });
+    }
+}
+
+pub fn all_blog_posts() -> Vec<BlogPost> {
+    let mut by_path: HashMap<PathBuf, BlogPost> = PATH_BLOG_POSTS.with(|posts| posts.borrow().clone());
+    BLOB_BLOG_POSTS.with(|posts| {
+        for post in posts.borrow().values() {
+            by_path.insert(post.path.clone(), post.clone());
+        }
+    });
+    by_path.into_values().collect()
 }
 
 /// Write every file under `tree_oid` (recursive) into `dest_root`, using objects from a decoded pack.
@@ -464,11 +531,21 @@ impl GitRemote {
             };
             let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
             let diff = self.tree_diff(&from, &current_tree);
-            BLOB_TIMESTAMPS.with(|ts| {
-                let mut map = ts.borrow_mut();
-                for (_, (state, maybe_oid)) in &diff {
+            BLOB_BLOG_POSTS.with(|posts| {
+                let mut map = posts.borrow_mut();
+                for (path, (state, maybe_oid)) in &diff {
                     if let (State::Created | State::Modified, Some(oid)) = (state, maybe_oid) {
-                        map.entry(*oid).or_insert(*commit_dt);
+                        PATH_TO_BLOB.with(|index| {
+                            index.borrow_mut().insert(path.clone(), *oid);
+                        });
+                        map.entry(*oid)
+                            .and_modify(|post| {
+                                if *commit_dt > post.last_updated {
+                                    post.last_updated = *commit_dt;
+                                }
+                                post.path = path.clone();
+                            })
+                            .or_insert_with(|| BlogPost::with_defaults(path.clone(), *commit_dt));
                     }
                 }
             });

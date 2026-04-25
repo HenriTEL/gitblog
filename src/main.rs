@@ -1,6 +1,13 @@
 use std::{error::Error, path::Path};
 
-use gitblog::{feed, git::State, html::markdown_file_to_html, static_content::write_static_content};
+use chrono::{DateTime, FixedOffset, Utc};
+use gitblog::{
+    blog_post::BlogPost,
+    feed,
+    git::{self, State},
+    html::{markdown_file_to_html, write_index_from_blog_posts},
+    static_content::write_static_content,
+};
 
 use clap::Parser;
 use gix::bstr::BStr;
@@ -32,7 +39,7 @@ fn main() {
 
     let args = CliArgs::parse();
     let atom_feed = fetch_atom_feed(&args.blog_url);
-    let (up_to, mut feed) = if args.full {
+    let (up_to, previous_feed) = if args.full {
         (MIN_UTC.fixed_offset(), atom_feed.ok())
     } else {
         match atom_feed {
@@ -52,6 +59,9 @@ fn main() {
     match url.scheme {
         gix::url::Scheme::Http | gix::url::Scheme::Https => {
             let remote = gitblog::git::GitRemote { url, branch: args.branch };
+            if let Some(feed) = &previous_feed {
+                hydrate_blog_posts_from_atom_feed(feed, &args.blog_url);
+            }
             let updated_file_blobs = if up_to == MIN_UTC.fixed_offset() {
                 vec![]
             } else {
@@ -68,46 +78,17 @@ fn main() {
                     }
                 }).collect::<Vec<_>>()
             };
-            if let Some(ref mut feed) = feed {
-                let mut max_updated = feed.updated;
-                for blob in &updated_file_blobs {
-                    if let Some(ts) = gitblog::git::blob_timestamp(&blob.oid) {
-                        if ts > max_updated {
-                            max_updated = ts;
-                        }
-                        let rel_html = blob.file_path.with_extension("html")
-                            .to_string_lossy().to_string();
-                        let entry_url = format!(
-                            "{}/{}",
-                            args.blog_url.trim_end_matches('/'),
-                            rel_html
-                        );
-                        if let Some(entry) = feed.entries.iter_mut().find(|e| e.link.href == entry_url) {
-                            entry.updated = ts;
-                        } else {
-                            let title = blob.file_path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("post")
-                                .to_string();
-                            feed.entries.push(feed::Entry {
-                                id: entry_url.clone(),
-                                title,
-                                updated: ts,
-                                link: feed::Link { href: entry_url, rel: "alternate".to_string() },
-                                summary: String::new(),
-                            });
-                        }
-                    }
-                }
-                feed.updated = max_updated;
-            }
             let dest = remote.pull_files(&updated_file_blobs, None).expect("fetch blobs");
+            refresh_blog_posts_from_markdown(&dest, &updated_file_blobs, args.full);
             render_markdown_files(&dest);
-            if let Some(ref feed) = feed {
-                let xml = feed::generate(feed).expect("generate atom feed");
-                std::fs::write(dest.join("atom.xml"), &xml).expect("write atom feed");
-                println!("wrote atom.xml");
-            }
+            let posts = git::all_blog_posts();
+            let generated_feed =
+                feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
+            let xml = feed::generate(&generated_feed).expect("generate atom feed");
+            std::fs::write(dest.join("atom.xml"), &xml).expect("write atom feed");
+            println!("wrote atom.xml");
+            write_index_from_blog_posts(&dest, &posts);
+            println!("wrote index.html");
             if up_to == MIN_UTC.fixed_offset() {
                 write_static_content(&dest);
             }
@@ -146,4 +127,88 @@ fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
     let body = reqwest::blocking::get(&url)?.error_for_status()?.text()?;
     let feed = feed::parse(&body)?;
     Ok(feed)
+}
+
+fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
+    for entry in &feed.entries {
+        let path = source_path_from_entry_url(blog_url, &entry.link.href);
+        let post = BlogPost::from_atom(
+            path.clone(),
+            entry.title.clone(),
+            entry.summary.clone(),
+            entry.updated,
+        );
+        git::update_blog_post_from_atom(path, post);
+    }
+}
+
+fn refresh_blog_posts_from_markdown(dest: &Path, blobs: &[git::FileBlob], full: bool) {
+    if full || blobs.is_empty() {
+        walk_markdown_files(dest, &mut |abs, rel| {
+            let md = std::fs::read_to_string(abs).expect("read markdown");
+            let ts = file_last_updated(abs);
+            git::update_blog_post_from_markdown_path(rel.to_path_buf(), &md, ts);
+        });
+        return;
+    }
+
+    for blob in blobs {
+        let markdown_path = dest.join(&blob.file_path);
+        if !markdown_path.extension().is_some_and(|e| e == "md") {
+            continue;
+        }
+        let md = std::fs::read_to_string(&markdown_path).expect("read markdown");
+        git::update_blog_post_from_markdown(&blob.oid, &md);
+    }
+}
+
+fn walk_markdown_files(dir: &Path, f: &mut impl FnMut(&Path, &Path)) {
+    fn walk(root: &Path, current: &Path, f: &mut impl FnMut(&Path, &Path)) {
+        let Ok(entries) = std::fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, f);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                let rel = path.strip_prefix(root).expect("strip prefix");
+                f(&path, rel);
+            }
+        }
+    }
+
+    walk(dir, dir, f);
+}
+
+fn source_path_from_entry_url(blog_url: &str, entry_url: &str) -> std::path::PathBuf {
+    let base = blog_url.trim_end_matches('/');
+    let rel = if let Some(suffix) = entry_url.strip_prefix(base) {
+        suffix.trim_start_matches('/').to_string()
+    } else if let Ok(url) = reqwest::Url::parse(entry_url) {
+        url.path().trim_start_matches('/').to_string()
+    } else {
+        entry_url.trim_start_matches('/').to_string()
+    };
+    let mut path = std::path::PathBuf::from(rel);
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => {
+            path.set_extension("md");
+            path
+        }
+        Some(_) => path,
+        None => {
+            path.set_extension("md");
+            path
+        }
+    }
+}
+
+fn file_last_updated(path: &Path) -> DateTime<FixedOffset> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(Utc::now)
+        .fixed_offset()
 }

@@ -6,11 +6,12 @@ use comrak::{markdown_to_html, Options};
 use serde::Serialize;
 use tera::{Context, Tera};
 
+use crate::blog_post::{BlogPost as DomainBlogPost, fallback_title, parse_title_and_summary};
 use crate::templates;
 
 /// Metadata for a single post, shared by article and index templates.
 #[derive(Debug, Clone, Serialize)]
-pub struct BlogPost {
+pub struct RenderBlogPost {
     pub title: String,
     pub author: String,
     pub description: Option<String>,
@@ -23,7 +24,7 @@ pub struct BlogPost {
 
 #[derive(Serialize)]
 struct ArticlePageContext {
-    blog_post: BlogPost,
+    blog_post: RenderBlogPost,
     main_content: String,
     sections: Vec<String>,
     avatar_url: Option<String>,
@@ -33,7 +34,7 @@ struct ArticlePageContext {
 #[derive(Serialize)]
 struct IndexPageContext {
     title: String,
-    blog_posts: Vec<BlogPost>,
+    blog_posts: Vec<RenderBlogPost>,
     feeds: HashMap<String, String>,
     sections: Vec<String>,
     avatar_url: Option<String>,
@@ -43,18 +44,6 @@ struct IndexPageContext {
 fn human_time(dt: DateTime<Utc>) -> String {
     let local = dt.with_timezone(&Local);
     local.format("%-d %B %Y").to_string()
-}
-
-fn extract_title(markdown: &str, fallback: &str) -> String {
-    for line in markdown.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("# ") {
-            if !rest.starts_with('#') {
-                return rest.trim().to_string();
-            }
-        }
-    }
-    fallback.to_string()
 }
 
 fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
@@ -71,7 +60,7 @@ fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
 pub fn render_index_html(
     tera: &Tera,
     page_title: &str,
-    blog_posts: Vec<BlogPost>,
+    blog_posts: Vec<RenderBlogPost>,
     feeds: HashMap<String, String>,
     sections: Vec<String>,
     avatar_url: Option<String>,
@@ -91,18 +80,50 @@ pub fn render_index_html(
     )
 }
 
+pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
+    let mut rendered_posts = posts
+        .iter()
+        .map(|post| {
+            let updated_utc = post.last_updated.with_timezone(&Utc);
+            RenderBlogPost {
+                title: post.title.clone(),
+                author: "Unknown".to_string(),
+                description: if post.summary.is_empty() {
+                    None
+                } else {
+                    Some(post.summary.clone())
+                },
+                creation_dt: updated_utc,
+                last_update_dt: updated_utc,
+                human_time: human_time(updated_utc),
+                relative_path: post.path.with_extension("html").to_string_lossy().to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    rendered_posts.sort_by(|a, b| b.last_update_dt.cmp(&a.last_update_dt));
+
+    let feeds = HashMap::from([("atom".to_string(), "/atom.xml".to_string())]);
+    let html = render_index_html(
+        templates::tera(),
+        "Blog",
+        rendered_posts,
+        feeds,
+        Vec::new(),
+        None,
+        HashMap::new(),
+    )
+    .expect("render index");
+    std::fs::write(dest.join("index.html"), html).expect("write index");
+}
+
 /// Converts a Markdown file to a full HTML page using the embedded article template.
 pub fn markdown_file_to_html(markdown_path: &Path) {
     let md_content = std::fs::read_to_string(markdown_path).expect("read markdown");
     // TODO: use git commit times
     let (created, modified) = file_times(markdown_path);
 
-    let fallback_title = markdown_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("post")
-        .to_string();
-    let title = extract_title(&md_content, &fallback_title);
+    let fallback_title = fallback_title(markdown_path);
+    let (title, summary) = parse_title_and_summary(&md_content, &fallback_title);
 
     let relative_path = format!(
         "{}.html",
@@ -112,10 +133,10 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
             .unwrap_or("post")
     );
 
-    let blog_post = BlogPost {
+    let blog_post = RenderBlogPost {
         title,
         author: "Unknown".to_string(),
-        description: None,
+        description: if summary.is_empty() { None } else { Some(summary) },
         creation_dt: created,
         last_update_dt: modified,
         human_time: human_time(modified),
