@@ -74,7 +74,9 @@ fn parse_frontmatter_date(value: &str) -> Option<DateTime<FixedOffset>> {
         NaiveDate::parse_from_str(value, "%Y-%m-%d")
             .ok()
             .and_then(|date| {
-                FixedOffset::east_opt(0)?.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).single()
+                FixedOffset::east_opt(0)?
+                    .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
+                    .single()
             })
     })
 }

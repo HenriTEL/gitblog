@@ -19,11 +19,11 @@
 - `tests/`: integration-style and behavior tests.
 
 ## Runtime flow (high level)
-1. Parse CLI args (`repo`, `branch`, `blog_url`, `--full`).
+1. Parse CLI args (`repo`, `branch`, `blog_url`, `--full`, optional `--gemini`).
 2. Fetch existing Atom feed to determine incremental cutoff.
 3. Pull changed files or full tree from remote Git repository.
 4. Refresh post metadata from markdown and/or feed state.
-5. Render markdown posts to HTML and build `index.html`.
+5. Render markdown posts to HTML and build `index.html` (and Gemini `.gmi` output only when `--gemini` is set).
 6. Generate `atom.xml` and copy static assets when needed.
 
 ## Guardrails

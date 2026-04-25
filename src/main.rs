@@ -1,4 +1,7 @@
-use std::{error::Error, path::Path};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use gitblog::{
@@ -7,6 +10,7 @@ use gitblog::{
     gemini::{markdown_file_to_gemtext, write_index_gemtext},
     git::{self, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
+    push,
     static_content::write_static_content,
 };
 
@@ -32,9 +36,15 @@ struct CliArgs {
     /// Generate all blog files, not just the ones that changed
     #[arg(long)]
     full: bool,
+    /// Generate Gemini (`.gmi`) output alongside HTML
+    #[arg(long)]
+    gemini: bool,
     /// Frontmatter delimiter used in markdown files (for example: --- or +++)
     #[arg(long, default_value = "---")]
     frontmatter_delimiter: String,
+    /// Push generated output to remote storage using an OpenDAL config file
+    #[arg(long)]
+    push: Option<PathBuf>,
 }
 
 fn main() {
@@ -102,7 +112,7 @@ fn main() {
                 &args.frontmatter_delimiter,
             );
             let posts = git::all_blog_posts();
-            render_markdown_files(&dest, &posts, &args.frontmatter_delimiter);
+            render_markdown_files(&dest, &posts, &args.frontmatter_delimiter, args.gemini);
             let generated_feed =
                 feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
             let xml = feed::generate(&generated_feed).expect("generate atom feed");
@@ -110,10 +120,20 @@ fn main() {
             println!("wrote atom.xml");
             write_index_from_blog_posts(&dest, &posts);
             println!("wrote index.html");
-            write_index_gemtext(&dest, &posts).expect("write gemini index");
-            println!("wrote index.gmi");
+            if args.gemini {
+                write_index_gemtext(&dest, &posts).expect("write gemini index");
+                println!("wrote index.gmi");
+            }
             if up_to == MIN_UTC.fixed_offset() {
                 write_static_content(&dest);
+            }
+            if let Some(config_path) = &args.push {
+                let summary = push::push_directory(&dest, config_path, args.full)
+                    .expect("push generated content to remote storage");
+                println!(
+                    "pushed {} files to remote storage (deleted {} stale remote files)",
+                    summary.uploaded_files, summary.deleted_files
+                );
             }
             println!("Blog built at {} ", dest.display());
         }
@@ -124,7 +144,12 @@ fn main() {
     }
 }
 
-fn render_markdown_files(dest: &Path, posts: &[BlogPost], frontmatter_delimiter: &str) {
+fn render_markdown_files(
+    dest: &Path,
+    posts: &[BlogPost],
+    frontmatter_delimiter: &str,
+    with_gemini: bool,
+) {
     let post_titles = posts
         .iter()
         .map(|post| (post.path.clone(), post.title.clone()))
@@ -132,13 +157,71 @@ fn render_markdown_files(dest: &Path, posts: &[BlogPost], frontmatter_delimiter:
     walk_markdown_files(dest, &mut |abs, rel| {
         markdown_file_to_html(abs, frontmatter_delimiter);
         println!("wrote {} ", rel.with_extension("html").to_string_lossy());
-        let title = post_titles
-            .get(rel)
-            .cloned()
-            .unwrap_or_else(|| fallback_title(rel));
-        markdown_file_to_gemtext(abs, &title).expect("write gemtext");
-        println!("wrote {} ", rel.with_extension("gmi").to_string_lossy());
+        if with_gemini {
+            let title = post_titles
+                .get(rel)
+                .cloned()
+                .unwrap_or_else(|| fallback_title(rel));
+            markdown_file_to_gemtext(abs, &title).expect("write gemtext");
+            println!("wrote {} ", rel.with_extension("gmi").to_string_lossy());
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CliArgs;
+    use clap::Parser;
+
+    #[test]
+    fn gemini_flag_defaults_to_false() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+        ]);
+        assert!(!args.gemini);
+    }
+
+    #[test]
+    fn gemini_flag_sets_true_when_present() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+            "--gemini",
+        ]);
+        assert!(args.gemini);
+    }
+
+    #[test]
+    fn push_flag_defaults_to_none() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+        ]);
+        assert!(args.push.is_none());
+    }
+
+    #[test]
+    fn push_flag_parses_path_when_present() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+            "--push",
+            "push.toml",
+        ]);
+        assert_eq!(
+            args.push.as_deref(),
+            Some(std::path::Path::new("push.toml"))
+        );
+    }
 }
 
 fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
