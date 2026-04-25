@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
-use comrak::{Options, markdown_to_html};
 use serde::Serialize;
 use tera::{Context, Tera};
 
-use crate::blog_post::{BlogPost as DomainBlogPost, fallback_title, parse_title_and_summary};
+use crate::blog_post::{BlogPost as DomainBlogPost, fallback_title};
+use crate::markdown::{parse_title_and_summary, render_markdown_to_html};
 use crate::templates;
 
 /// Metadata for a single post, shared by article and index templates.
@@ -163,14 +163,7 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
         relative_path,
     };
 
-    let mut options = Options::default();
-    options.extension.footnotes = true;
-    options.extension.strikethrough = true;
-    options.extension.table = true;
-    options.extension.tasklist = true;
-    options.extension.alerts = true;
-
-    let main_content = markdown_to_html(&md_content, &options);
+    let main_content = render_markdown_to_html(&md_content);
 
     let ctx = ArticlePageContext {
         blog_post,

@@ -113,7 +113,11 @@ pub fn write_index_gemtext(dest: &Path, blog_posts: &[BlogPost]) -> std::io::Res
 
     let mut gemtext = String::from("# Blog\n\n");
     for post in posts {
-        let relative_path = post.path.with_extension("gmi").to_string_lossy().to_string();
+        let relative_path = post
+            .path
+            .with_extension("gmi")
+            .to_string_lossy()
+            .to_string();
         let date = post.last_updated.format("%Y-%m-%d");
         gemtext.push_str(&format!("=> /{relative_path} {} ({date})\n", post.title));
     }
@@ -265,8 +269,12 @@ mod tests {
         write_index_gemtext(dir.path(), &posts).expect("write index");
         let index = std::fs::read_to_string(dir.path().join("index.gmi")).expect("read index");
         assert!(index.starts_with("# Blog"));
-        let newer_idx = index.find("=> /notes/newer.gmi Newer").expect("newer entry");
-        let older_idx = index.find("=> /notes/older.gmi Older").expect("older entry");
+        let newer_idx = index
+            .find("=> /notes/newer.gmi Newer")
+            .expect("newer entry");
+        let older_idx = index
+            .find("=> /notes/older.gmi Older")
+            .expect("older entry");
         assert!(newer_idx < older_idx);
     }
 }
