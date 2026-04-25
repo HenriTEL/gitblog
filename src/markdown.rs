@@ -14,9 +14,17 @@ impl Frontmatter {
     }
 }
 
-fn parse_frontmatter(markdown: &str) -> Frontmatter {
+fn frontmatter_delimiter_option(frontmatter_delimiter: &str) -> Option<String> {
+    if frontmatter_delimiter.trim().is_empty() {
+        None
+    } else {
+        Some(frontmatter_delimiter.to_string())
+    }
+}
+
+fn parse_frontmatter(markdown: &str, frontmatter_delimiter: &str) -> Frontmatter {
     let mut options = Options::default();
-    options.extension.front_matter_delimiter = Some("---".to_string());
+    options.extension.front_matter_delimiter = frontmatter_delimiter_option(frontmatter_delimiter);
 
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
@@ -113,22 +121,23 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
 pub fn parse_content_metadata(
     markdown: &str,
     fallback_title: &str,
+    frontmatter_delimiter: &str,
 ) -> (String, String, Option<DateTime<FixedOffset>>) {
-    let frontmatter = parse_frontmatter(markdown);
+    let frontmatter = parse_frontmatter(markdown, frontmatter_delimiter);
     let (body_title, body_summary) = parse_title_and_summary(markdown, fallback_title);
     let title = frontmatter.title.unwrap_or(body_title);
     let summary = frontmatter.description.unwrap_or(body_summary);
     (title, summary, frontmatter.date)
 }
 
-pub fn render_markdown_to_html(markdown: &str) -> String {
+pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> String {
     let mut options = Options::default();
     options.extension.footnotes = true;
     options.extension.strikethrough = true;
     options.extension.table = true;
     options.extension.tasklist = true;
     options.extension.alerts = true;
-    options.extension.front_matter_delimiter = Some("---".to_string());
+    options.extension.front_matter_delimiter = frontmatter_delimiter_option(frontmatter_delimiter);
 
     markdown_to_html(markdown, &options)
 }
@@ -166,7 +175,7 @@ mod tests {
     #[test]
     fn markdown_render_supports_tables_and_tasklists() {
         let md = "| h |\n| - |\n| a |\n\n- [x] done";
-        let html = render_markdown_to_html(md);
+        let html = render_markdown_to_html(md, "---");
         assert!(html.contains("<table>"));
         assert!(html.contains("type=\"checkbox\""));
     }
@@ -182,7 +191,7 @@ date: 2026-04-24
 
 > Body summary
 "#;
-        let (title, summary, date) = parse_content_metadata(md, "fallback");
+        let (title, summary, date) = parse_content_metadata(md, "fallback", "---");
         assert_eq!(title, "Frontmatter Title");
         assert_eq!(summary, "Frontmatter Description");
         let date = date.expect("date should be parsed");
@@ -200,7 +209,7 @@ date: 2026-04-24T10:15:30+02:00
 ---
 Body
 "#;
-        let (_title, _summary, date) = parse_content_metadata(md, "fallback");
+        let (_title, _summary, date) = parse_content_metadata(md, "fallback", "---");
         let date = date.expect("date should be parsed");
         assert_eq!(date.year(), 2026);
         assert_eq!(date.month(), 4);
@@ -218,9 +227,25 @@ author: me
 
 > Body summary
 "#;
-        let (title, summary, date) = parse_content_metadata(md, "fallback");
+        let (title, summary, date) = parse_content_metadata(md, "fallback", "---");
         assert_eq!(title, "Body Title");
         assert_eq!(summary, "Body summary");
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn supports_custom_frontmatter_delimiter() {
+        let md = r#"+++
+title: Custom
+description: Uses custom delimiter
++++
+# Body Title
+
+> Body summary
+"#;
+        let (title, summary, date) = parse_content_metadata(md, "fallback", "+++");
+        assert_eq!(title, "Custom");
+        assert_eq!(summary, "Uses custom delimiter");
         assert!(date.is_none());
     }
 }

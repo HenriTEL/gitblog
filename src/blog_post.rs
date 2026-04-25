@@ -91,9 +91,10 @@ impl BlogPost {
         }
     }
 
-    pub fn update_from_source_content(&mut self, content: &str) {
+    pub fn update_from_source_content(&mut self, content: &str, frontmatter_delimiter: &str) {
         let fallback = fallback_title(&self.path);
-        let (title, summary, date) = parse_content_metadata(content, &fallback);
+        let (title, summary, date) =
+            parse_content_metadata(content, &fallback, frontmatter_delimiter);
         self.title = title;
         self.summary = summary;
         if let Some(date) = date {

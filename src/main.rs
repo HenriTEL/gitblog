@@ -32,6 +32,9 @@ struct CliArgs {
     /// Generate all blog files, not just the ones that changed
     #[arg(long)]
     full: bool,
+    /// Frontmatter delimiter used in markdown files (for example: --- or +++)
+    #[arg(long, default_value = "---")]
+    frontmatter_delimiter: String,
 }
 
 fn main() {
@@ -92,9 +95,14 @@ fn main() {
             let dest = remote
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
-            refresh_blog_posts_from_markdown(&dest, &updated_file_blobs, args.full);
+            refresh_blog_posts_from_markdown(
+                &dest,
+                &updated_file_blobs,
+                args.full,
+                &args.frontmatter_delimiter,
+            );
             let posts = git::all_blog_posts();
-            render_markdown_files(&dest, &posts);
+            render_markdown_files(&dest, &posts, &args.frontmatter_delimiter);
             let generated_feed =
                 feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
             let xml = feed::generate(&generated_feed).expect("generate atom feed");
@@ -116,13 +124,13 @@ fn main() {
     }
 }
 
-fn render_markdown_files(dest: &Path, posts: &[BlogPost]) {
+fn render_markdown_files(dest: &Path, posts: &[BlogPost], frontmatter_delimiter: &str) {
     let post_titles = posts
         .iter()
         .map(|post| (post.path.clone(), post.title.clone()))
         .collect::<std::collections::HashMap<_, _>>();
     walk_markdown_files(dest, &mut |abs, rel| {
-        markdown_file_to_html(abs);
+        markdown_file_to_html(abs, frontmatter_delimiter);
         println!("wrote {} ", rel.with_extension("html").to_string_lossy());
         let title = post_titles
             .get(rel)
@@ -153,14 +161,24 @@ fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
     }
 }
 
-fn refresh_blog_posts_from_markdown(dest: &Path, blobs: &[git::FileBlob], full: bool) {
+fn refresh_blog_posts_from_markdown(
+    dest: &Path,
+    blobs: &[git::FileBlob],
+    full: bool,
+    frontmatter_delimiter: &str,
+) {
     let ignored_matcher = ignored_files_matcher(dest);
 
     if full || blobs.is_empty() {
         walk_markdown_files(dest, &mut |abs, rel| {
             let md = std::fs::read_to_string(abs).expect("read markdown");
             let ts = file_last_updated(abs);
-            git::update_blog_post_from_markdown_path(rel.to_path_buf(), &md, ts);
+            git::update_blog_post_from_markdown_path(
+                rel.to_path_buf(),
+                &md,
+                ts,
+                frontmatter_delimiter,
+            );
         });
         return;
     }
@@ -174,7 +192,7 @@ fn refresh_blog_posts_from_markdown(dest: &Path, blobs: &[git::FileBlob], full: 
             continue;
         }
         let md = std::fs::read_to_string(&markdown_path).expect("read markdown");
-        git::update_blog_post_from_markdown(&blob.oid, &md);
+        git::update_blog_post_from_markdown(&blob.oid, &md, frontmatter_delimiter);
     }
 }
 

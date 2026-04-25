@@ -6,7 +6,7 @@ use serde::Serialize;
 use tera::{Context, Tera};
 
 use crate::blog_post::{BlogPost as DomainBlogPost, fallback_title};
-use crate::markdown::{parse_title_and_summary, render_markdown_to_html};
+use crate::markdown::{parse_content_metadata, render_markdown_to_html};
 use crate::templates;
 
 /// Metadata for a single post, shared by article and index templates.
@@ -131,13 +131,15 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
 }
 
 /// Converts a Markdown file to a full HTML page using the embedded article template.
-pub fn markdown_file_to_html(markdown_path: &Path) {
+pub fn markdown_file_to_html(markdown_path: &Path, frontmatter_delimiter: &str) {
     let md_content = std::fs::read_to_string(markdown_path).expect("read markdown");
     // TODO: use git commit times
     let (created, modified) = file_times(markdown_path);
 
     let fallback_title = fallback_title(markdown_path);
-    let (title, summary) = parse_title_and_summary(&md_content, &fallback_title);
+    let (title, summary, parsed_date) =
+        parse_content_metadata(&md_content, &fallback_title, frontmatter_delimiter);
+    let modified = parsed_date.unwrap_or(modified);
 
     let relative_path = format!(
         "{}.html",
@@ -163,7 +165,7 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
         relative_path,
     };
 
-    let main_content = render_markdown_to_html(&md_content);
+    let main_content = render_markdown_to_html(&md_content, frontmatter_delimiter);
 
     let ctx = ArticlePageContext {
         blog_post,
@@ -198,7 +200,7 @@ mod tests {
     fn markdown_to_full_html_page() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "# Hello\n\nBody **bold**.").unwrap();
-        markdown_file_to_html(f.path());
+        markdown_file_to_html(f.path(), "---");
         let html_path = f.path().with_extension("html");
         let html = std::fs::read_to_string(&html_path).unwrap();
         assert!(html.contains("<!doctype html>"));

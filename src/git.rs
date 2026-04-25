@@ -74,9 +74,13 @@ pub fn update_blog_post_from_atom(path: PathBuf, post: BlogPost) {
     blog_post::upsert(post);
 }
 
-pub fn update_blog_post_from_markdown(oid: &gix::ObjectId, markdown: &str) {
+pub fn update_blog_post_from_markdown(
+    oid: &gix::ObjectId,
+    markdown: &str,
+    frontmatter_delimiter: &str,
+) {
     if let Some(mut post) = blog_post::get_by_object_id(oid) {
-        post.update_from_source_content(markdown);
+        post.update_from_source_content(markdown, frontmatter_delimiter);
         blog_post::upsert(post);
     }
 }
@@ -85,6 +89,7 @@ pub fn update_blog_post_from_markdown_path(
     path: PathBuf,
     markdown: &str,
     last_updated: DateTime<FixedOffset>,
+    frontmatter_delimiter: &str,
 ) {
     if blog_post::get_by_path(&path).is_none() {
         blog_post::upsert_with_defaults(path.clone(), None, last_updated);
@@ -97,7 +102,7 @@ pub fn update_blog_post_from_markdown_path(
         },
     );
     if let Some(mut post) = blog_post::get_by_path(&path) {
-        post.update_from_source_content(markdown);
+        post.update_from_source_content(markdown, frontmatter_delimiter);
         blog_post::upsert(post);
     }
 }
