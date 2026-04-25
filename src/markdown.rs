@@ -1,4 +1,75 @@
-use comrak::{Options, markdown_to_html};
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use comrak::{Arena, Options, markdown_to_html, nodes::NodeValue, parse_document};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frontmatter {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub date: Option<DateTime<FixedOffset>>,
+}
+
+impl Frontmatter {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.description.is_none() && self.date.is_none()
+    }
+}
+
+fn parse_frontmatter(markdown: &str) -> Frontmatter {
+    let mut options = Options::default();
+    options.extension.front_matter_delimiter = Some("---".to_string());
+
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+    for node in root.children() {
+        if let NodeValue::FrontMatter(raw) = &node.data.borrow().value {
+            return parse_frontmatter_fields(raw);
+        }
+    }
+
+    Frontmatter {
+        title: None,
+        description: None,
+        date: None,
+    }
+}
+
+fn parse_frontmatter_fields(raw: &str) -> Frontmatter {
+    let mut frontmatter = Frontmatter {
+        title: None,
+        description: None,
+        date: None,
+    };
+
+    for line in raw.lines() {
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = raw_value.trim().trim_matches('"').trim_matches('\'');
+        if value.is_empty() {
+            continue;
+        }
+
+        match key {
+            "title" => frontmatter.title = Some(value.to_string()),
+            "description" => frontmatter.description = Some(value.to_string()),
+            "date" => frontmatter.date = parse_frontmatter_date(value),
+            _ => {}
+        }
+    }
+
+    frontmatter
+}
+
+fn parse_frontmatter_date(value: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(value).ok().or_else(|| {
+        NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| {
+                FixedOffset::east_opt(0)?.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).single()
+            })
+    })
+}
 
 pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, String) {
     let lines: Vec<&str> = markdown.lines().collect();
@@ -39,6 +110,17 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
     (title, quote_lines.join("\n"))
 }
 
+pub fn parse_content_metadata(
+    markdown: &str,
+    fallback_title: &str,
+) -> (String, String, Option<DateTime<FixedOffset>>) {
+    let frontmatter = parse_frontmatter(markdown);
+    let (body_title, body_summary) = parse_title_and_summary(markdown, fallback_title);
+    let title = frontmatter.title.unwrap_or(body_title);
+    let summary = frontmatter.description.unwrap_or(body_summary);
+    (title, summary, frontmatter.date)
+}
+
 pub fn render_markdown_to_html(markdown: &str) -> String {
     let mut options = Options::default();
     options.extension.footnotes = true;
@@ -46,13 +128,16 @@ pub fn render_markdown_to_html(markdown: &str) -> String {
     options.extension.table = true;
     options.extension.tasklist = true;
     options.extension.alerts = true;
+    options.extension.front_matter_delimiter = Some("---".to_string());
 
     markdown_to_html(markdown, &options)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_title_and_summary, render_markdown_to_html};
+    use chrono::{Datelike, Timelike};
+
+    use super::{parse_content_metadata, parse_title_and_summary, render_markdown_to_html};
 
     #[test]
     fn extracts_title_and_multiline_summary() {
@@ -84,5 +169,58 @@ mod tests {
         let html = render_markdown_to_html(md);
         assert!(html.contains("<table>"));
         assert!(html.contains("type=\"checkbox\""));
+    }
+
+    #[test]
+    fn frontmatter_overrides_title_and_summary_and_sets_date() {
+        let md = r#"---
+title: Frontmatter Title
+description: Frontmatter Description
+date: 2026-04-24
+---
+# Body Title
+
+> Body summary
+"#;
+        let (title, summary, date) = parse_content_metadata(md, "fallback");
+        assert_eq!(title, "Frontmatter Title");
+        assert_eq!(summary, "Frontmatter Description");
+        let date = date.expect("date should be parsed");
+        assert_eq!(date.year(), 2026);
+        assert_eq!(date.month(), 4);
+        assert_eq!(date.day(), 24);
+        assert_eq!(date.hour(), 0);
+        assert_eq!(date.minute(), 0);
+    }
+
+    #[test]
+    fn frontmatter_date_parses_rfc3339() {
+        let md = r#"---
+date: 2026-04-24T10:15:30+02:00
+---
+Body
+"#;
+        let (_title, _summary, date) = parse_content_metadata(md, "fallback");
+        let date = date.expect("date should be parsed");
+        assert_eq!(date.year(), 2026);
+        assert_eq!(date.month(), 4);
+        assert_eq!(date.day(), 24);
+        assert_eq!(date.hour(), 10);
+        assert_eq!(date.minute(), 15);
+    }
+
+    #[test]
+    fn falls_back_to_markdown_when_frontmatter_missing_keys() {
+        let md = r#"---
+author: me
+---
+# Body Title
+
+> Body summary
+"#;
+        let (title, summary, date) = parse_content_metadata(md, "fallback");
+        assert_eq!(title, "Body Title");
+        assert_eq!(summary, "Body summary");
+        assert!(date.is_none());
     }
 }

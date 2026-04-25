@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, FixedOffset};
 use gix::ObjectId;
 
-use crate::markdown::parse_title_and_summary;
+use crate::markdown::parse_content_metadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlogPost {
@@ -93,9 +93,12 @@ impl BlogPost {
 
     pub fn update_from_source_content(&mut self, content: &str) {
         let fallback = fallback_title(&self.path);
-        let (title, summary) = parse_title_and_summary(content, &fallback);
+        let (title, summary, date) = parse_content_metadata(content, &fallback);
         self.title = title;
         self.summary = summary;
+        if let Some(date) = date {
+            self.last_updated = date;
+        }
     }
 
     fn apply_update(&mut self, update: BlogPostUpdate) {
