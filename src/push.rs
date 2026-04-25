@@ -31,6 +31,7 @@ pub fn push_directory(
     root: &Path,
     config_path: &Path,
     delete_extras: bool,
+    dry_run: bool,
 ) -> Result<PushSummary, Box<dyn std::error::Error>> {
     let config = read_push_config(config_path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -38,28 +39,31 @@ pub fn push_directory(
         .enable_all()
         .build()?;
     let _guard = runtime.enter();
-    let target = build_push_target(&config)?;
-    let op = &target.op;
+    let op = &build_push_target(&config)?;
 
     let local_files = collect_local_files(root)?;
     println!("push: collected {} local files to sync", local_files.len());
     for file in &local_files {
-        let remote_path = target.remote_path(&file.path);
-        println!("push: uploading {}", remote_path);
-        op.write(remote_path.as_str(), file.bytes.clone())?;
-        println!("push: uploaded {}", remote_path);
+        if dry_run {
+            println!("Skipping upload {}", &file.path);
+        } else {
+            println!("Uploading {}", &file.path);
+            op.write(&file.path.as_str(), file.bytes.clone())?;
+            println!("Uploaded {}", &file.path);
+        }
     }
 
     let deleted_files = if delete_extras {
-        let remote_files = list_remote_files(op, target.list_base())?;
-        let local_paths: HashSet<String> = local_files
-            .iter()
-            .map(|f| target.remote_path(&f.path))
-            .collect();
+        let remote_files = list_remote_files(op, "/")?;
+        let local_paths: HashSet<String> = local_files.iter().map(|f| f.path.clone()).collect();
         let deletions = compute_deletions(&local_paths, &remote_files, delete_extras);
         for path in &deletions {
-            println!("push: deleting {}", path);
-            op.delete(path)?;
+            if dry_run {
+                println!("Skipping delete {}", &path);
+            } else {
+                op.delete(path)?;
+                println!("Deleted {}", path);
+            }
         }
         deletions.len()
     } else {
@@ -78,41 +82,10 @@ fn read_push_config(path: &Path) -> Result<PushConfig, Box<dyn std::error::Error
     Ok(config)
 }
 
-struct PushTarget {
-    op: blocking::Operator,
-    key_prefix: String,
-}
-
-impl PushTarget {
-    fn remote_path(&self, relative_path: &str) -> String {
-        format!("{}{}", self.key_prefix, relative_path)
-    }
-
-    fn list_base(&self) -> &str {
-        if self.key_prefix.is_empty() {
-            "/"
-        } else {
-            self.key_prefix.as_str()
-        }
-    }
-}
-
-fn build_push_target(config: &PushConfig) -> Result<PushTarget, Box<dyn std::error::Error>> {
-    let mut options = config.options.clone();
-    let mut key_prefix = String::new();
-
-    if config.scheme.eq_ignore_ascii_case("ftp") {
-        let ftp_root = options.remove("root").unwrap_or_else(|| "/".to_string());
-        key_prefix = normalize_ftp_root_prefix(&ftp_root);
-        println!(
-            "push: using FTP path prefix '{}' (OpenDAL root disabled to avoid FTP cwd/mkdir loop)",
-            if key_prefix.is_empty() {
-                "/"
-            } else {
-                key_prefix.as_str()
-            }
-        );
-    }
+fn build_push_target(
+    config: &PushConfig,
+) -> Result<blocking::Operator, Box<dyn std::error::Error>> {
+    let options = config.options.clone();
 
     let op = Operator::via_iter(config.scheme.as_str(), options)?.layer(
         RetryLayer::new()
@@ -124,10 +97,7 @@ fn build_push_target(config: &PushConfig) -> Result<PushTarget, Box<dyn std::err
                 );
             }),
     );
-    Ok(PushTarget {
-        op: blocking::Operator::new(op)?,
-        key_prefix,
-    })
+    Ok(blocking::Operator::new(op)?)
 }
 
 fn collect_local_files(root: &Path) -> Result<Vec<LocalFile>, Box<dyn std::error::Error>> {
@@ -205,19 +175,10 @@ fn normalize_remote_entry_path(path: &str) -> String {
     path.trim_start_matches('/').to_string()
 }
 
-fn normalize_ftp_root_prefix(root: &str) -> String {
-    let trimmed = root.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!("{trimmed}/")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_local_files, compute_deletions, normalize_ftp_root_prefix, read_push_config,
+        collect_local_files, compute_deletions, read_push_config,
     };
     use std::{collections::HashSet, fs};
     use tempfile::tempdir;
@@ -291,14 +252,5 @@ bucket = "my-bucket"
         let temp = tempdir().expect("create temp dir");
         let files = collect_local_files(temp.path()).expect("collect files");
         assert!(files.is_empty());
-    }
-
-    #[test]
-    fn normalize_ftp_root_prefix_handles_common_inputs() {
-        assert_eq!(normalize_ftp_root_prefix("/"), "");
-        assert_eq!(normalize_ftp_root_prefix(""), "");
-        assert_eq!(normalize_ftp_root_prefix("blog"), "blog/");
-        assert_eq!(normalize_ftp_root_prefix("/blog/"), "blog/");
-        assert_eq!(normalize_ftp_root_prefix(" /blog/assets/ "), "blog/assets/");
     }
 }

@@ -36,6 +36,9 @@ struct CliArgs {
     /// Generate all blog files, not just the ones that changed
     #[arg(long)]
     full: bool,
+    /// Build output without performing remote upload/delete operations
+    #[arg(long)]
+    dry_run: bool,
     /// Generate Gemini (`.gmi`) output alongside HTML
     #[arg(long)]
     gemini: bool,
@@ -110,6 +113,7 @@ fn main() {
             let dest = remote
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
+            println!("Using destination: {:?}", dest.to_str());
             refresh_blog_posts_from_markdown(
                 &dest,
                 &updated_file_blobs,
@@ -133,12 +137,14 @@ fn main() {
                 write_static_content(&dest);
             }
             if let Some(config_path) = &args.push {
-                let summary = push::push_directory(&dest, config_path, args.full)
+                let push_summary = push::push_directory(&dest, config_path, args.full, args.dry_run)
                     .expect("push generated content to remote storage");
-                println!(
-                    "pushed {} files to remote storage (deleted {} stale remote files)",
-                    summary.uploaded_files, summary.deleted_files
-                );
+                if !args.dry_run {
+                    println!(
+                        "pushed {} files to remote storage (deleted {} stale remote files)",
+                        push_summary.uploaded_files, push_summary.deleted_files
+                    );
+                }
             }
             println!("Blog built at {} ", dest.display());
         }
@@ -241,6 +247,29 @@ mod tests {
             args.push.as_deref(),
             Some(std::path::Path::new("./config.toml"))
         );
+    }
+
+    #[test]
+    fn dry_run_flag_defaults_to_false() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+        ]);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn dry_run_flag_sets_true_when_present() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+            "--dry-run",
+        ]);
+        assert!(args.dry_run);
     }
 }
 
