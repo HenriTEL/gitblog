@@ -43,14 +43,19 @@ struct CliArgs {
     #[arg(long, default_value = "---")]
     frontmatter_delimiter: String,
     /// Push generated output to remote storage using an OpenDAL config file
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, default_missing_value = "./config.toml")]
     push: Option<PathBuf>,
 }
 
 fn main() {
-    // tracing_subscriber::fmt()
-    //     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-    //     .init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,opendal=debug,suppaftp=debug")
+            }),
+        )
+        .with_target(true)
+        .init();
 
     let args = CliArgs::parse();
     let atom_feed = fetch_atom_feed(&args.blog_url);
@@ -222,6 +227,21 @@ mod tests {
             Some(std::path::Path::new("push.toml"))
         );
     }
+
+    #[test]
+    fn push_flag_uses_default_config_when_no_value() {
+        let args = CliArgs::parse_from([
+            "gitblog",
+            "https://example.com/repo.git",
+            "--blog-url",
+            "https://example.com",
+            "--push",
+        ]);
+        assert_eq!(
+            args.push.as_deref(),
+            Some(std::path::Path::new("./config.toml"))
+        );
+    }
 }
 
 fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
@@ -309,7 +329,7 @@ fn walk_markdown_files(dir: &Path, f: &mut impl FnMut(&Path, &Path)) {
 
 fn ignored_files_matcher(root: &Path) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);
-    for pattern in gitblog::IGNORED_FILES {
+    for pattern in gitblog::IGNORE_FILES {
         builder
             .add_line(None, pattern)
             .unwrap_or_else(|e| panic!("invalid ignore pattern `{pattern}`: {e}"));

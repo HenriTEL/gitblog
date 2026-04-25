@@ -8,4 +8,4 @@ pub mod push;
 pub mod static_content;
 pub(crate) mod templates;
 
-pub const IGNORED_FILES: &[&str] = &["draft/"];
+pub const IGNORE_FILES: &[&str] = &["draft/", "LICENSE.md"];

@@ -2,9 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
+    time::Duration,
 };
 
-use opendal::{EntryMode, Operator, blocking};
+use opendal::{EntryMode, Operator, blocking, layers::RetryLayer};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -32,22 +33,32 @@ pub fn push_directory(
     delete_extras: bool,
 ) -> Result<PushSummary, Box<dyn std::error::Error>> {
     let config = read_push_config(config_path)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()?;
     let _guard = runtime.enter();
-    let op = build_operator(&config)?;
+    let target = build_push_target(&config)?;
+    let op = &target.op;
 
     let local_files = collect_local_files(root)?;
+    println!("push: collected {} local files to sync", local_files.len());
     for file in &local_files {
-        op.write(file.path.as_str(), file.bytes.clone())?;
+        let remote_path = target.remote_path(&file.path);
+        println!("push: uploading {}", remote_path);
+        op.write(remote_path.as_str(), file.bytes.clone())?;
+        println!("push: uploaded {}", remote_path);
     }
 
     let deleted_files = if delete_extras {
-        let remote_files = list_remote_files(&op)?;
-        let local_paths: HashSet<String> = local_files.iter().map(|f| f.path.clone()).collect();
+        let remote_files = list_remote_files(op, target.list_base())?;
+        let local_paths: HashSet<String> = local_files
+            .iter()
+            .map(|f| target.remote_path(&f.path))
+            .collect();
         let deletions = compute_deletions(&local_paths, &remote_files, delete_extras);
         for path in &deletions {
+            println!("push: deleting {}", path);
             op.delete(path)?;
         }
         deletions.len()
@@ -67,9 +78,56 @@ fn read_push_config(path: &Path) -> Result<PushConfig, Box<dyn std::error::Error
     Ok(config)
 }
 
-fn build_operator(config: &PushConfig) -> Result<blocking::Operator, Box<dyn std::error::Error>> {
-    let op = Operator::via_iter(config.scheme.as_str(), config.options.clone())?;
-    Ok(blocking::Operator::new(op)?)
+struct PushTarget {
+    op: blocking::Operator,
+    key_prefix: String,
+}
+
+impl PushTarget {
+    fn remote_path(&self, relative_path: &str) -> String {
+        format!("{}{}", self.key_prefix, relative_path)
+    }
+
+    fn list_base(&self) -> &str {
+        if self.key_prefix.is_empty() {
+            "/"
+        } else {
+            self.key_prefix.as_str()
+        }
+    }
+}
+
+fn build_push_target(config: &PushConfig) -> Result<PushTarget, Box<dyn std::error::Error>> {
+    let mut options = config.options.clone();
+    let mut key_prefix = String::new();
+
+    if config.scheme.eq_ignore_ascii_case("ftp") {
+        let ftp_root = options.remove("root").unwrap_or_else(|| "/".to_string());
+        key_prefix = normalize_ftp_root_prefix(&ftp_root);
+        println!(
+            "push: using FTP path prefix '{}' (OpenDAL root disabled to avoid FTP cwd/mkdir loop)",
+            if key_prefix.is_empty() {
+                "/"
+            } else {
+                key_prefix.as_str()
+            }
+        );
+    }
+
+    let op = Operator::via_iter(config.scheme.as_str(), options)?.layer(
+        RetryLayer::new()
+            .with_max_times(3)
+            .with_notify(|err: &opendal::Error, delay: Duration| {
+                eprintln!(
+                    "push: retrying OpenDAL operation in {:?} after error: {}",
+                    delay, err
+                );
+            }),
+    );
+    Ok(PushTarget {
+        op: blocking::Operator::new(op)?,
+        key_prefix,
+    })
 }
 
 fn collect_local_files(root: &Path) -> Result<Vec<LocalFile>, Box<dyn std::error::Error>> {
@@ -102,9 +160,10 @@ fn collect_local_files(root: &Path) -> Result<Vec<LocalFile>, Box<dyn std::error
 
 fn list_remote_files(
     op: &blocking::Operator,
+    start_dir: &str,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     let mut files = HashSet::new();
-    let mut pending_dirs = vec!["/".to_string()];
+    let mut pending_dirs = vec![start_dir.to_string()];
     while let Some(dir) = pending_dirs.pop() {
         for item in op.lister(dir.as_str())? {
             let entry: opendal::Entry = item?;
@@ -146,9 +205,20 @@ fn normalize_remote_entry_path(path: &str) -> String {
     path.trim_start_matches('/').to_string()
 }
 
+fn normalize_ftp_root_prefix(root: &str) -> String {
+    let trimmed = root.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_local_files, compute_deletions, read_push_config};
+    use super::{
+        collect_local_files, compute_deletions, normalize_ftp_root_prefix, read_push_config,
+    };
     use std::{collections::HashSet, fs};
     use tempfile::tempdir;
 
@@ -221,5 +291,14 @@ bucket = "my-bucket"
         let temp = tempdir().expect("create temp dir");
         let files = collect_local_files(temp.path()).expect("collect files");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn normalize_ftp_root_prefix_handles_common_inputs() {
+        assert_eq!(normalize_ftp_root_prefix("/"), "");
+        assert_eq!(normalize_ftp_root_prefix(""), "");
+        assert_eq!(normalize_ftp_root_prefix("blog"), "blog/");
+        assert_eq!(normalize_ftp_root_prefix("/blog/"), "blog/");
+        assert_eq!(normalize_ftp_root_prefix(" /blog/assets/ "), "blog/assets/");
     }
 }
