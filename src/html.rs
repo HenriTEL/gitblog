@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Local, Utc};
-use comrak::{markdown_to_html, Options};
+use comrak::{Options, markdown_to_html};
 use serde::Serialize;
 use tera::{Context, Tera};
 
@@ -96,7 +96,11 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
                 creation_dt: updated_utc,
                 last_update_dt: updated_utc,
                 human_time: human_time(updated_utc),
-                relative_path: post.path.with_extension("html").to_string_lossy().to_string(),
+                relative_path: post
+                    .path
+                    .with_extension("html")
+                    .to_string_lossy()
+                    .to_string(),
             }
         })
         .collect::<Vec<_>>();
@@ -136,7 +140,11 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
     let blog_post = RenderBlogPost {
         title,
         author: "Unknown".to_string(),
-        description: if summary.is_empty() { None } else { Some(summary) },
+        description: if summary.is_empty() {
+            None
+        } else {
+            Some(summary)
+        },
         creation_dt: created,
         last_update_dt: modified,
         human_time: human_time(modified),

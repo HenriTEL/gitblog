@@ -4,3 +4,5 @@ pub mod git;
 pub mod html;
 pub mod static_content;
 pub(crate) mod templates;
+
+pub const IGNORED_FILES: &[&str] = &["draft/"];

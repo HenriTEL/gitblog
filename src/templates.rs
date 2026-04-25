@@ -49,8 +49,7 @@ static TERA: OnceLock<Tera> = OnceLock::new();
 pub fn tera() -> &'static Tera {
     TERA.get_or_init(|| {
         let mut tera = Tera::default();
-        tera
-            .add_raw_templates(RAW_TEMPLATES.iter().copied())
+        tera.add_raw_templates(RAW_TEMPLATES.iter().copied())
             .expect("embedded templates must parse");
         tera
     })

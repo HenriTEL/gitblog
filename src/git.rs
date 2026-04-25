@@ -1,19 +1,19 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gix::bstr::{BString, ByteSlice};
-use gix::objs::{CommitRef, TreeRef};
 use gix::objs::Tree;
+use gix::objs::{CommitRef, TreeRef};
 use gix::progress;
 use gix::protocol::handshake::Ref;
+use gix::protocol::transport::client::http;
 use gix::protocol::transport::packetline::read::ProgressAction;
 use gix::protocol::{Command, fetch, ls_refs};
-use gix::protocol::transport::client::http;
 use gix_pack::cache;
 use gix_pack::data::decode::entry::ResolvedBase;
 
@@ -105,7 +105,8 @@ pub fn update_blog_post_from_markdown_path(
     last_updated: DateTime<FixedOffset>,
 ) {
     let maybe_oid = PATH_TO_BLOB.with(|index| index.borrow().get(&path).copied());
-    let mut post = blob_blog_post_by_path(&path).unwrap_or_else(|| BlogPost::with_defaults(path.clone(), last_updated));
+    let mut post = blob_blog_post_by_path(&path)
+        .unwrap_or_else(|| BlogPost::with_defaults(path.clone(), last_updated));
     post.last_updated = last_updated;
     post.update_from_markdown(markdown);
 
@@ -121,7 +122,8 @@ pub fn update_blog_post_from_markdown_path(
 }
 
 pub fn all_blog_posts() -> Vec<BlogPost> {
-    let mut by_path: HashMap<PathBuf, BlogPost> = PATH_BLOG_POSTS.with(|posts| posts.borrow().clone());
+    let mut by_path: HashMap<PathBuf, BlogPost> =
+        PATH_BLOG_POSTS.with(|posts| posts.borrow().clone());
     BLOB_BLOG_POSTS.with(|posts| {
         for post in posts.borrow().values() {
             by_path.insert(post.path.clone(), post.clone());
@@ -151,10 +153,7 @@ fn write_tree_from_pack_store(
             let dir_at = dest_root.join(&path);
             fs::create_dir_all(&dir_at)?;
             write_tree_from_pack_store(store, dest_root, &entry.oid, &path)?;
-        } else if entry.mode.is_blob()
-            || entry.mode.is_executable()
-            || entry.mode.is_link()
-        {
+        } else if entry.mode.is_blob() || entry.mode.is_executable() || entry.mode.is_link() {
             let (bk, blob) = store
                 .get(&entry.oid)
                 .ok_or_else(|| format!("blob {} not in pack", entry.oid))?;
@@ -198,7 +197,10 @@ impl GitRemote {
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let dest = match destination {
             Some(path) => path,
-            None => std::env::temp_dir().join(format!("gitblog-files-{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())),
+            None => std::env::temp_dir().join(format!(
+                "gitblog-files-{}",
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            )),
         };
         fs::create_dir_all(&dest)?;
 
@@ -220,7 +222,8 @@ impl GitRemote {
 
         let fetch_features =
             Command::Fetch.default_features(outcome.server_protocol_version, &outcome.capabilities);
-        let mut args = fetch::Arguments::new(outcome.server_protocol_version, fetch_features, false);
+        let mut args =
+            fetch::Arguments::new(outcome.server_protocol_version, fetch_features, false);
         if blobs.len() > 0 {
             for blob in blobs {
                 args.want(blob.oid);
@@ -236,14 +239,18 @@ impl GitRemote {
                 },
                 &mut progress::Discard,
                 false,
-            ).expect("ls_refs command");
+            )
+            .expect("ls_refs command");
 
             let target_ref = format!("refs/heads/{}", self.branch);
             let head_oid = refs
                 .iter()
                 .find_map(|r| match r {
-                    Ref::Direct { full_ref_name, object, .. }
-                        if *full_ref_name == target_ref.as_bytes() => Some(*object),
+                    Ref::Direct {
+                        full_ref_name,
+                        object,
+                        ..
+                    } if *full_ref_name == target_ref.as_bytes() => Some(*object),
                     _ => None,
                 })
                 .expect(&format!("{} not found", target_ref));
@@ -307,7 +314,9 @@ impl GitRemote {
 
             let kind = outcome.kind;
             let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, kind, out.as_slice());
-            decoded_objects.borrow_mut().insert(oid, (kind, out.clone()));
+            decoded_objects
+                .borrow_mut()
+                .insert(oid, (kind, out.clone()));
 
             if !requested.is_empty() && matches!(kind, gix::objs::Kind::Blob) {
                 if let Some(path) = requested.get(&oid) {
@@ -344,7 +353,11 @@ impl GitRemote {
     /// Fetch changes since the given date and time.
     /// Return the Tree objects corresponding to the up_to and head commits.
     pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
-        let mut transport = http::connect(self.url.clone(), gix::protocol::transport::Protocol::default(), true);
+        let mut transport = http::connect(
+            self.url.clone(),
+            gix::protocol::transport::Protocol::default(),
+            true,
+        );
 
         // Capture handshake outcome: we need server_protocol_version and capabilities
         // to pass real server features to fetch::Arguments::new later.
@@ -354,7 +367,8 @@ impl GitRemote {
             &mut |_| Ok(None),
             vec![],
             &mut progress::Discard,
-        ).expect("initial handshake");
+        )
+        .expect("initial handshake");
 
         // ls_refs filtered to refs/heads/main via a ref-prefix argument.
         let prefix = BString::new(format!("ref-prefix refs/heads/{}", self.branch).into());
@@ -367,28 +381,29 @@ impl GitRemote {
             },
             &mut progress::Discard,
             false,
-        ).expect("ls_refs command");
+        )
+        .expect("ls_refs command");
 
         let target_ref = format!("refs/heads/{}", self.branch);
         let head_oid = refs
             .iter()
             .find_map(|r| match r {
-                Ref::Direct { full_ref_name, object, .. }
-                    if *full_ref_name == target_ref.as_bytes() => Some(*object),
+                Ref::Direct {
+                    full_ref_name,
+                    object,
+                    ..
+                } if *full_ref_name == target_ref.as_bytes() => Some(*object),
                 _ => None,
             })
             .expect(&format!("{} not found", target_ref));
 
         // Command::Fetch.default_features() reads the server capabilities to build
         // the feature list that Arguments::new needs to gate can_use_shallow() etc.
-        let fetch_features = Command::Fetch
-            .default_features(outcome.server_protocol_version, &outcome.capabilities);
+        let fetch_features =
+            Command::Fetch.default_features(outcome.server_protocol_version, &outcome.capabilities);
 
-        let mut args = fetch::Arguments::new(
-            outcome.server_protocol_version,
-            fetch_features,
-            false,
-        );
+        let mut args =
+            fetch::Arguments::new(outcome.server_protocol_version, fetch_features, false);
 
         args.want(head_oid);
         // Limit history depth so we don't download the full repository.
@@ -417,7 +432,8 @@ impl GitRemote {
             &mut reader,
             true,  // client_expects_pack
             false, // wants_to_negotiate
-        ).expect("fetch response");
+        )
+        .expect("fetch response");
 
         assert!(response.has_pack(), "expected a packfile in fetch response");
 
@@ -523,7 +539,9 @@ impl GitRemote {
 
         for i in 0..commit_infos.len() {
             let (tree_oid, commit_dt) = &commit_infos[i];
-            let Some(current_tree) = cached_tree(tree_oid) else { continue };
+            let Some(current_tree) = cached_tree(tree_oid) else {
+                continue;
+            };
             let parent_tree = if i + 1 < commit_infos.len() {
                 cached_tree(&commit_infos[i + 1].0)
             } else {
@@ -589,7 +607,11 @@ impl GitRemote {
                         match right_entries.get(name) {
                             None => {
                                 if left_entry.mode.is_tree() {
-                                    queue.push_back((full_path, cached_tree(&left_entry.oid), None));
+                                    queue.push_back((
+                                        full_path,
+                                        cached_tree(&left_entry.oid),
+                                        None,
+                                    ));
                                 } else {
                                     result.insert(full_path, (State::Deleted, None));
                                 }
@@ -609,15 +631,29 @@ impl GitRemote {
                                         ));
                                     }
                                     (false, false) => {
-                                        result.insert(full_path, (State::Modified, Some(right_entry.oid)));
+                                        result.insert(
+                                            full_path,
+                                            (State::Modified, Some(right_entry.oid)),
+                                        );
                                     }
                                     (true, false) => {
-                                        queue.push_back((full_path.clone(), cached_tree(&left_entry.oid), None));
-                                        result.insert(full_path, (State::Created, Some(right_entry.oid)));
+                                        queue.push_back((
+                                            full_path.clone(),
+                                            cached_tree(&left_entry.oid),
+                                            None,
+                                        ));
+                                        result.insert(
+                                            full_path,
+                                            (State::Created, Some(right_entry.oid)),
+                                        );
                                     }
                                     (false, true) => {
                                         result.insert(full_path.clone(), (State::Deleted, None));
-                                        queue.push_back((full_path, None, cached_tree(&right_entry.oid)));
+                                        queue.push_back((
+                                            full_path,
+                                            None,
+                                            cached_tree(&right_entry.oid),
+                                        ));
                                     }
                                 }
                             }

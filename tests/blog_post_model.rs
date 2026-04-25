@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, FixedOffset};
 use gitblog::{
-    blog_post::BlogPost,
-    feed::build_feed_from_blog_posts,
-    html::write_index_from_blog_posts,
+    blog_post::BlogPost, feed::build_feed_from_blog_posts, html::write_index_from_blog_posts,
 };
 use tempfile::tempdir;
 

@@ -11,6 +11,7 @@ use gitblog::{
 
 use clap::Parser;
 use gix::bstr::BStr;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::error;
 
 const MIN_UTC: chrono::DateTime<chrono::Utc> = chrono::DateTime::<chrono::Utc>::MIN_UTC;
@@ -54,11 +55,14 @@ fn main() {
             }
         }
     };
-    
+
     let url = gix::Url::from_bytes(BStr::new(args.repo.as_bytes())).expect("build git url");
     match url.scheme {
         gix::url::Scheme::Http | gix::url::Scheme::Https => {
-            let remote = gitblog::git::GitRemote { url, branch: args.branch };
+            let remote = gitblog::git::GitRemote {
+                url,
+                branch: args.branch,
+            };
             if let Some(feed) = &previous_feed {
                 hydrate_blog_posts_from_atom_feed(feed, &args.blog_url);
             }
@@ -67,18 +71,26 @@ fn main() {
             } else {
                 let tree_ends = remote.fetch_since(&up_to);
                 let diff = remote.tree_diff(&tree_ends.up_to_tree, &tree_ends.head_tree);
-                diff.iter().filter_map(|(path, (state, maybe_oid))| {
-                    match (state, maybe_oid) {
-                        (State::Created, Some(oid)) => Some(gitblog::git::FileBlob { file_path: path.clone(), oid: oid.to_owned() }),
+                diff.iter()
+                    .filter_map(|(path, (state, maybe_oid))| match (state, maybe_oid) {
+                        (State::Created, Some(oid)) => Some(gitblog::git::FileBlob {
+                            file_path: path.clone(),
+                            oid: oid.to_owned(),
+                        }),
                         (State::Deleted, None) => None,
-                        (State::Modified, Some(oid)) => Some(gitblog::git::FileBlob { file_path: path.clone(), oid: oid.to_owned() }),
+                        (State::Modified, Some(oid)) => Some(gitblog::git::FileBlob {
+                            file_path: path.clone(),
+                            oid: oid.to_owned(),
+                        }),
                         (State::Created, None) => None,
                         (State::Deleted, Some(_)) => None,
                         (State::Modified, None) => None,
-                    }
-                }).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
             };
-            let dest = remote.pull_files(&updated_file_blobs, None).expect("fetch blobs");
+            let dest = remote
+                .pull_files(&updated_file_blobs, None)
+                .expect("fetch blobs");
             refresh_blog_posts_from_markdown(&dest, &updated_file_blobs, args.full);
             render_markdown_files(&dest);
             let posts = git::all_blog_posts();
@@ -93,33 +105,19 @@ fn main() {
                 write_static_content(&dest);
             }
             println!("Blog built at {} ", dest.display());
-        },
-        _ => error!("The URL {} resolved to protocol {} which is not supported.", url, url.scheme), // TODO exit failure
+        }
+        _ => error!(
+            "The URL {} resolved to protocol {} which is not supported.",
+            url, url.scheme
+        ), // TODO exit failure
     }
 }
 
 fn render_markdown_files(dest: &Path) {
-    fn walk(dir: &Path, dest_root: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, dest_root);
-            } else if path.extension().is_some_and(|e| e == "md") {
-                markdown_file_to_html(&path);
-                println!(
-                    "wrote {} ",
-                    path.strip_prefix(dest_root)
-                        .unwrap()
-                        .with_extension("html")
-                        .to_string_lossy()
-                );
-            }
-        }
-    }
-    walk(dest, dest);
+    walk_markdown_files(dest, &mut |abs, rel| {
+        markdown_file_to_html(abs);
+        println!("wrote {} ", rel.with_extension("html").to_string_lossy());
+    });
 }
 
 fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
@@ -143,6 +141,8 @@ fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
 }
 
 fn refresh_blog_posts_from_markdown(dest: &Path, blobs: &[git::FileBlob], full: bool) {
+    let ignored_matcher = ignored_files_matcher(dest);
+
     if full || blobs.is_empty() {
         walk_markdown_files(dest, &mut |abs, rel| {
             let md = std::fs::read_to_string(abs).expect("read markdown");
@@ -157,28 +157,58 @@ fn refresh_blog_posts_from_markdown(dest: &Path, blobs: &[git::FileBlob], full: 
         if !markdown_path.extension().is_some_and(|e| e == "md") {
             continue;
         }
+        if markdown_is_ignored(&blob.file_path, &ignored_matcher) {
+            continue;
+        }
         let md = std::fs::read_to_string(&markdown_path).expect("read markdown");
         git::update_blog_post_from_markdown(&blob.oid, &md);
     }
 }
 
 fn walk_markdown_files(dir: &Path, f: &mut impl FnMut(&Path, &Path)) {
-    fn walk(root: &Path, current: &Path, f: &mut impl FnMut(&Path, &Path)) {
+    let ignored_matcher = ignored_files_matcher(dir);
+    fn walk(
+        root: &Path,
+        current: &Path,
+        ignored_matcher: &Gitignore,
+        f: &mut impl FnMut(&Path, &Path),
+    ) {
         let Ok(entries) = std::fs::read_dir(current) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(root, &path, f);
+                walk(root, &path, ignored_matcher, f);
             } else if path.extension().is_some_and(|e| e == "md") {
                 let rel = path.strip_prefix(root).expect("strip prefix");
+                if markdown_is_ignored(rel, ignored_matcher) {
+                    continue;
+                }
                 f(&path, rel);
             }
         }
     }
 
-    walk(dir, dir, f);
+    walk(dir, dir, &ignored_matcher, f);
+}
+
+fn ignored_files_matcher(root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+    for pattern in gitblog::IGNORED_FILES {
+        builder
+            .add_line(None, pattern)
+            .unwrap_or_else(|e| panic!("invalid ignore pattern `{pattern}`: {e}"));
+    }
+    builder
+        .build()
+        .unwrap_or_else(|e| panic!("failed building ignore matcher: {e}"))
+}
+
+fn markdown_is_ignored(relative_path: &Path, ignored_matcher: &Gitignore) -> bool {
+    ignored_matcher
+        .matched_path_or_any_parents(relative_path, false)
+        .is_ignore()
 }
 
 fn source_path_from_entry_url(blog_url: &str, entry_url: &str) -> std::path::PathBuf {

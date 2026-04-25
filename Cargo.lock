@@ -800,6 +800,7 @@ dependencies = [
  "gix",
  "gix-pack",
  "gix-traverse",
+ "ignore",
  "log",
  "quick-xml 0.37.5",
  "reqwest",

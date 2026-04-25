@@ -1,7 +1,7 @@
 use chrono::{DateTime, FixedOffset};
-use serde::Deserialize;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use serde::Deserialize;
 use std::io::Cursor;
 
 use crate::blog_post::BlogPost;
@@ -64,7 +64,11 @@ pub fn build_feed_from_blog_posts(
     let entries = sorted_posts
         .iter()
         .map(|post| {
-            let rel_html = post.path.with_extension("html").to_string_lossy().to_string();
+            let rel_html = post
+                .path
+                .with_extension("html")
+                .to_string_lossy()
+                .to_string();
             let href = format!("{base_url}/{rel_html}");
             Entry {
                 id: href.clone(),
