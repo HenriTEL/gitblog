@@ -8,7 +8,6 @@ pub mod gemini;
 pub mod git;
 pub mod html;
 pub mod markdown;
-pub mod push;
 pub mod static_content;
 pub(crate) mod templates;
 

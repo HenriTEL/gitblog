@@ -10,7 +10,6 @@ use gitblog::{
     gemini::{markdown_file_to_gemtext, write_index_gemtext},
     git::{self, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
-    push,
     static_content::write_static_content,
 };
 
@@ -35,23 +34,17 @@ struct CliArgs {
     /// Generate all blog files, not just the ones that changed
     #[arg(long)]
     full: bool,
-    /// Build output without performing remote upload/delete operations
-    #[arg(long)]
-    dry_run: bool,
     /// Generate Gemini (`.gmi`) output alongside HTML
     #[arg(long)]
     gemini: bool,
     /// Frontmatter delimiter used in markdown files (for example: --- or +++)
     #[arg(long, default_value = "---")]
     frontmatter_delimiter: String,
-    /// Push generated output to remote storage using an OpenDAL config file
-    #[arg(long, num_args = 0..=1, default_missing_value = "./config.toml")]
-    push: Option<PathBuf>,
 }
 
 fn main() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,opendal=debug,suppaftp=debug"))
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
         .add_directive("gix_packetline=off".parse().expect("valid tracing directive"))
         .add_directive(
             "gix_packetline::read::blocking_io=off"
@@ -125,16 +118,6 @@ fn main() {
             if up_to == MIN_UTC.fixed_offset() {
                 write_static_content(&dest);
             }
-            if let Some(config_path) = &args.push {
-                let push_summary = push::push_directory(&dest, config_path, args.full, args.dry_run)
-                    .expect("push generated content to remote storage");
-                if !args.dry_run {
-                    println!(
-                        "pushed {} files to remote storage (deleted {} stale remote files)",
-                        push_summary.uploaded_files, push_summary.deleted_files
-                    );
-                }
-            }
             println!("Blog built at {} ", dest.display());
         }
         _ => error!(
@@ -166,7 +149,6 @@ fn render_markdown_files(
             println!("wrote {} ", rel.with_extension("gmi").to_string_lossy());
         }
         std::fs::remove_file(abs).expect("remove rendered markdown");
-        println!("removed {} ", rel.to_string_lossy());
     });
 }
 
@@ -227,71 +209,6 @@ mod tests {
             "--gemini",
         ]);
         assert!(args.gemini);
-    }
-
-    #[test]
-    fn push_flag_defaults_to_none() {
-        let args = CliArgs::parse_from([
-            "gitblog",
-            "https://example.com/repo.git",
-            "--blog-url",
-            "https://example.com",
-        ]);
-        assert!(args.push.is_none());
-    }
-
-    #[test]
-    fn push_flag_parses_path_when_present() {
-        let args = CliArgs::parse_from([
-            "gitblog",
-            "https://example.com/repo.git",
-            "--blog-url",
-            "https://example.com",
-            "--push",
-            "push.toml",
-        ]);
-        assert_eq!(
-            args.push.as_deref(),
-            Some(std::path::Path::new("push.toml"))
-        );
-    }
-
-    #[test]
-    fn push_flag_uses_default_config_when_no_value() {
-        let args = CliArgs::parse_from([
-            "gitblog",
-            "https://example.com/repo.git",
-            "--blog-url",
-            "https://example.com",
-            "--push",
-        ]);
-        assert_eq!(
-            args.push.as_deref(),
-            Some(std::path::Path::new("./config.toml"))
-        );
-    }
-
-    #[test]
-    fn dry_run_flag_defaults_to_false() {
-        let args = CliArgs::parse_from([
-            "gitblog",
-            "https://example.com/repo.git",
-            "--blog-url",
-            "https://example.com",
-        ]);
-        assert!(!args.dry_run);
-    }
-
-    #[test]
-    fn dry_run_flag_sets_true_when_present() {
-        let args = CliArgs::parse_from([
-            "gitblog",
-            "https://example.com/repo.git",
-            "--blog-url",
-            "https://example.com",
-            "--dry-run",
-        ]);
-        assert!(args.dry_run);
     }
 
     #[test]
