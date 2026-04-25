@@ -4,6 +4,7 @@ use chrono::{DateTime, FixedOffset};
 use gitblog::{
     blog_post::BlogPost,
     feed::{build_feed_from_blog_posts, generate},
+    gemini::write_index_gemtext,
     html::write_index_from_blog_posts,
 };
 use tempfile::tempdir;
@@ -69,4 +70,13 @@ fn writes_index_from_blog_posts() {
     assert!(html.contains("Alpha"));
     assert!(html.contains("Zeta"));
     assert!(html.contains("/atom.xml"));
+
+    write_index_gemtext(dir.path(), &posts).expect("write gemini index");
+    let gmi = std::fs::read_to_string(dir.path().join("index.gmi")).expect("read gemini index");
+    assert!(gmi.contains("# Blog"));
+    assert!(gmi.contains("=> /notes/alpha.gmi Alpha"));
+    assert!(gmi.contains("=> /notes/zeta.gmi Zeta"));
+    let alpha_idx = gmi.find("=> /notes/alpha.gmi Alpha").expect("alpha entry");
+    let zeta_idx = gmi.find("=> /notes/zeta.gmi Zeta").expect("zeta entry");
+    assert!(alpha_idx < zeta_idx);
 }

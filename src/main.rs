@@ -2,8 +2,9 @@ use std::{error::Error, path::Path};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use gitblog::{
-    blog_post::BlogPost,
+    blog_post::{BlogPost, fallback_title},
     feed,
+    gemini::{markdown_file_to_gemtext, write_index_gemtext},
     git::{self, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
     static_content::write_static_content,
@@ -92,8 +93,8 @@ fn main() {
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
             refresh_blog_posts_from_markdown(&dest, &updated_file_blobs, args.full);
-            render_markdown_files(&dest);
             let posts = git::all_blog_posts();
+            render_markdown_files(&dest, &posts);
             let generated_feed =
                 feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
             let xml = feed::generate(&generated_feed).expect("generate atom feed");
@@ -101,6 +102,8 @@ fn main() {
             println!("wrote atom.xml");
             write_index_from_blog_posts(&dest, &posts);
             println!("wrote index.html");
+            write_index_gemtext(&dest, &posts).expect("write gemini index");
+            println!("wrote index.gmi");
             if up_to == MIN_UTC.fixed_offset() {
                 write_static_content(&dest);
             }
@@ -113,10 +116,20 @@ fn main() {
     }
 }
 
-fn render_markdown_files(dest: &Path) {
+fn render_markdown_files(dest: &Path, posts: &[BlogPost]) {
+    let post_titles = posts
+        .iter()
+        .map(|post| (post.path.clone(), post.title.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
     walk_markdown_files(dest, &mut |abs, rel| {
         markdown_file_to_html(abs);
         println!("wrote {} ", rel.with_extension("html").to_string_lossy());
+        let title = post_titles
+            .get(rel)
+            .cloned()
+            .unwrap_or_else(|| fallback_title(rel));
+        markdown_file_to_gemtext(abs, &title).expect("write gemtext");
+        println!("wrote {} ", rel.with_extension("gmi").to_string_lossy());
     });
 }
 
