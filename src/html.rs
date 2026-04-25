@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
 use comrak::{Options, markdown_to_html};
 use serde::Serialize;
 use tera::{Context, Tera};
@@ -15,8 +15,10 @@ pub struct RenderBlogPost {
     pub title: String,
     pub author: String,
     pub description: Option<String>,
-    pub creation_dt: DateTime<Utc>,
-    pub last_update_dt: DateTime<Utc>,
+    pub creation_dt: DateTime<FixedOffset>,
+    pub last_update_dt: DateTime<FixedOffset>,
+    pub creation_dt_rfc3339: String,
+    pub last_update_dt_rfc3339: String,
     pub human_time: String,
     /// Site-relative URL path (e.g. `notes/foo.html`).
     pub relative_path: String,
@@ -41,18 +43,24 @@ struct IndexPageContext {
     social_accounts: HashMap<String, String>,
 }
 
-fn human_time(dt: DateTime<Utc>) -> String {
+fn human_time(dt: DateTime<FixedOffset>) -> String {
     let local = dt.with_timezone(&Local);
     local.format("%-d %B %Y").to_string()
 }
 
-fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
+fn format_rfc3339_seconds(dt: DateTime<FixedOffset>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, false)
+}
+
+fn file_times(path: &Path) -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
     let meta = std::fs::metadata(path).expect("file metadata");
     let modified = meta
         .modified()
         .ok()
         .map(DateTime::<Utc>::from)
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(Utc::now)
+        .with_timezone(&Local)
+        .fixed_offset();
     (modified, modified)
 }
 
@@ -84,7 +92,7 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
     let mut rendered_posts = posts
         .iter()
         .map(|post| {
-            let updated_utc = post.last_updated.with_timezone(&Utc);
+            let updated = post.last_updated;
             RenderBlogPost {
                 title: post.title.clone(),
                 author: "Unknown".to_string(),
@@ -93,9 +101,11 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
                 } else {
                     Some(post.summary.clone())
                 },
-                creation_dt: updated_utc,
-                last_update_dt: updated_utc,
-                human_time: human_time(updated_utc),
+                creation_dt: updated,
+                last_update_dt: updated,
+                creation_dt_rfc3339: format_rfc3339_seconds(updated),
+                last_update_dt_rfc3339: format_rfc3339_seconds(updated),
+                human_time: human_time(updated),
                 relative_path: post
                     .path
                     .with_extension("html")
@@ -147,6 +157,8 @@ pub fn markdown_file_to_html(markdown_path: &Path) {
         },
         creation_dt: created,
         last_update_dt: modified,
+        creation_dt_rfc3339: format_rfc3339_seconds(created),
+        last_update_dt_rfc3339: format_rfc3339_seconds(modified),
         human_time: human_time(modified),
         relative_path,
     };
@@ -199,5 +211,18 @@ mod tests {
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("Hello"));
         assert!(html.contains("<strong>bold</strong>"));
+        let published_line = html
+            .lines()
+            .find(|line| line.contains("article:published_time"))
+            .expect("published meta tag");
+        let modified_line = html
+            .lines()
+            .find(|line| line.contains("article:modified_time"))
+            .expect("modified meta tag");
+
+        assert!(!published_line.contains('.'));
+        assert!(!modified_line.contains('.'));
+        assert!(!published_line.contains('Z'));
+        assert!(!modified_line.contains('Z'));
     }
 }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat};
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::Deserialize;
@@ -85,7 +85,7 @@ pub fn build_feed_from_blog_posts(
 
     let fallback_updated = previous
         .map(|f| f.updated)
-        .unwrap_or_else(|| chrono::Utc::now().fixed_offset());
+        .unwrap_or_else(|| chrono::Utc::now().with_timezone(&Local).fixed_offset());
     let updated = sorted_posts
         .iter()
         .map(|p| p.last_updated)
@@ -126,7 +126,7 @@ pub fn generate(feed: &Feed) -> Result<String, quick_xml::Error> {
 
     write_text_elem(&mut writer, "id", &feed.id)?;
     write_text_elem(&mut writer, "title", &feed.title)?;
-    write_text_elem(&mut writer, "updated", &feed.updated.to_rfc3339())?;
+    write_text_elem(&mut writer, "updated", &rfc3339_seconds(feed.updated))?;
 
     writer.write_event(Event::Start(BytesStart::new("author")))?;
     write_text_elem(&mut writer, "name", &feed.author.name)?;
@@ -148,7 +148,7 @@ pub fn generate(feed: &Feed) -> Result<String, quick_xml::Error> {
 
         write_text_elem(&mut writer, "id", &entry.id)?;
         write_text_elem(&mut writer, "title", &entry.title)?;
-        write_text_elem(&mut writer, "updated", &entry.updated.to_rfc3339())?;
+        write_text_elem(&mut writer, "updated", &rfc3339_seconds(entry.updated))?;
 
         let mut link_el = BytesStart::new("link");
         link_el.push_attribute(("href", entry.link.href.as_str()));
@@ -179,4 +179,8 @@ fn write_text_elem<W: std::io::Write>(
     writer.write_event(Event::Text(BytesText::new(text)))?;
     writer.write_event(Event::End(BytesEnd::new(name)))?;
     Ok(())
+}
+
+fn rfc3339_seconds(dt: DateTime<FixedOffset>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, false)
 }

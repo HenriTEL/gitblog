@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, FixedOffset};
 use gitblog::{
-    blog_post::BlogPost, feed::build_feed_from_blog_posts, html::write_index_from_blog_posts,
+    blog_post::BlogPost,
+    feed::{build_feed_from_blog_posts, generate},
+    html::write_index_from_blog_posts,
 };
 use tempfile::tempdir;
 
@@ -35,6 +37,11 @@ fn builds_atom_feed_from_blog_posts() {
         "https://example.com/blog/notes/second.html"
     );
     assert_eq!(feed.entries[1].summary, "Summary one");
+
+    let xml = generate(&feed).expect("atom xml generation");
+    assert!(xml.contains("<updated>2026-04-02T10:00:00+02:00</updated>"));
+    assert!(xml.contains("<updated>2026-04-01T10:00:00+02:00</updated>"));
+    assert!(!xml.contains("T10:00:00.000"));
 }
 
 #[test]
