@@ -128,6 +128,9 @@ fn write_tree_from_pack_store(
     let tree = Tree::from(tree_ref);
     for entry in &tree.entries {
         let path = relative.join(entry.filename.to_str_lossy().as_ref());
+        if crate::path_is_ignored(&path, entry.mode.is_tree()) {
+            continue;
+        }
         if entry.mode.is_tree() {
             let dir_at = dest_root.join(&path);
             fs::create_dir_all(&dir_at)?;
