@@ -10,6 +10,7 @@ pub mod html;
 pub mod markdown;
 pub mod static_content;
 pub(crate) mod templates;
+pub mod user_profile;
 
 pub const IGNORE_FILES: &[&str] = &["draft/", "LICENSE.md"];
 
