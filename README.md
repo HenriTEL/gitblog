@@ -1,6 +1,6 @@
 # gitblog
 
-A blog-aware static website generator.
+An individual blog generator.
 
 ## Dev Quickstart
 

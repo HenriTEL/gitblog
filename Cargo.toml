@@ -19,3 +19,5 @@ log = "0.4"
 tera = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ignore = "0.4"
+regex = "1"
+html5ever = "0.39.0"

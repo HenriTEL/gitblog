@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -11,6 +12,10 @@ use gitblog::{
     git::{self, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
     static_content::write_static_content,
+    user_profile::{
+        GithubUserProfile, UserProfileDownloadError, UserProfileMeta,
+        download as download_user_profile,
+    },
 };
 
 use clap::Parser;
@@ -18,6 +23,112 @@ use gix::bstr::BStr;
 use log::error;
 
 const MIN_UTC: chrono::DateTime<chrono::Utc> = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+
+/// URI did not designate a github.com Git remote, parsing failed, or profile download failed.
+#[derive(Debug)]
+pub enum UpdateProfileError {
+    GitUrl(gix::url::parse::Error),
+    UnsupportedRepositoryScheme(String),
+    UnsupportedHost(String),
+    NonUtf8RepoPath,
+    MissingRepoOwner,
+    Download(UserProfileDownloadError),
+}
+
+impl fmt::Display for UpdateProfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UpdateProfileError::GitUrl(e) => write!(f, "invalid Git URL: {e}"),
+            UpdateProfileError::UnsupportedRepositoryScheme(s) => {
+                write!(f, "repository scheme `{s}` is not supported")
+            }
+            UpdateProfileError::UnsupportedHost(h) => {
+                write!(
+                    f,
+                    "unsupported host `{h}` (only github.com profiles are implemented)"
+                )
+            }
+            UpdateProfileError::NonUtf8RepoPath => write!(f, "repository path is not valid UTF-8"),
+            UpdateProfileError::MissingRepoOwner => write!(
+                f,
+                "could not derive a GitHub username or organization from the repository path"
+            ),
+            UpdateProfileError::Download(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl Error for UpdateProfileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            UpdateProfileError::GitUrl(e) => Some(e),
+            UpdateProfileError::Download(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Fetch profile picture and metadata for the Git hosting implied by `repo_uri` (currently only
+/// [GitHub](https://github.com)) and writes the avatar under `dest/media/avatar`.
+pub fn update_profile(
+    repo_uri: &str,
+    dest: impl AsRef<Path>,
+) -> Result<UserProfileMeta, UpdateProfileError> {
+    let url =
+        gix::Url::from_bytes(BStr::new(repo_uri.as_bytes())).map_err(UpdateProfileError::GitUrl)?;
+
+    match url.scheme {
+        gix::url::Scheme::Http | gix::url::Scheme::Https | gix::url::Scheme::Ssh => {}
+        s => {
+            return Err(UpdateProfileError::UnsupportedRepositoryScheme(
+                s.to_string(),
+            ));
+        }
+    }
+
+    let host = url.host().unwrap_or("");
+    if !is_github_dot_com_host(host) {
+        return Err(UpdateProfileError::UnsupportedHost(host.to_owned()));
+    }
+
+    let owner = github_owner_from_git_path(url.path.as_ref())?;
+    download_user_profile(&GithubUserProfile::new(owner), dest)
+        .map_err(UpdateProfileError::Download)
+}
+
+/// Downloads the repo owner’s avatar and bio unless `force_full` is false and `dest/media/avatar` already exists.
+fn maybe_update_user_profile(force_full: bool, repo_uri: &str, dest: &Path) {
+    let avatar_path = dest.join("media/avatar");
+    if force_full || !avatar_path.is_file() {
+        match update_profile(repo_uri, dest) {
+            Ok(_) => {}
+            Err(e) => log::warn!("could not update user profile: {e}"),
+        }
+    } else {
+        log::debug!(
+            "skipping user profile update; {} already exists and --full was not passed",
+            avatar_path.display()
+        );
+    }
+}
+
+fn is_github_dot_com_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com")
+}
+
+/// First segment of [`gix::Url::path`] (e.g. `owner/repo` → `owner`, `/owner/repo.git` → `owner`).
+fn github_owner_from_git_path(path: &[u8]) -> Result<String, UpdateProfileError> {
+    let path_str = std::str::from_utf8(path).map_err(|_| UpdateProfileError::NonUtf8RepoPath)?;
+    let trimmed = path_str.trim().trim_matches('/');
+
+    trimmed
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|segment| segment.trim_end_matches(".git").to_string())
+        .filter(|owner| !owner.is_empty())
+        .ok_or(UpdateProfileError::MissingRepoOwner)
+}
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -45,7 +156,11 @@ struct CliArgs {
 fn main() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-        .add_directive("gix_packetline=off".parse().expect("valid tracing directive"))
+        .add_directive(
+            "gix_packetline=off"
+                .parse()
+                .expect("valid tracing directive"),
+        )
         .add_directive(
             "gix_packetline::read::blocking_io=off"
                 .parse()
@@ -95,6 +210,7 @@ fn main() {
             let dest = remote
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
+            maybe_update_user_profile(args.full, &args.repo, dest.as_ref());
             refresh_blog_posts_from_markdown(
                 &dest,
                 &updated_file_blobs,
@@ -184,7 +300,12 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    use super::{CliArgs, collect_updated_file_blobs, render_markdown_files};
+    use gix::bstr::BStr;
+
+    use super::{
+        CliArgs, collect_updated_file_blobs, github_owner_from_git_path, is_github_dot_com_host,
+        render_markdown_files,
+    };
     use clap::Parser;
     use tempfile::tempdir;
 
@@ -244,7 +365,10 @@ mod tests {
         render_markdown_files(dir.path(), &[], "---", false);
 
         assert!(!markdown_path.exists(), "markdown should be removed");
-        assert!(dir.path().join("post.html").exists(), "html should be written");
+        assert!(
+            dir.path().join("post.html").exists(),
+            "html should be written"
+        );
     }
 
     #[test]
@@ -257,8 +381,60 @@ mod tests {
         render_markdown_files(dir.path(), &[], "---", true);
 
         assert!(!markdown_path.exists(), "markdown should be removed");
-        assert!(dir.path().join("post.html").exists(), "html should be written");
-        assert!(dir.path().join("post.gmi").exists(), "gemini should be written");
+        assert!(
+            dir.path().join("post.html").exists(),
+            "html should be written"
+        );
+        assert!(
+            dir.path().join("post.gmi").exists(),
+            "gemini should be written"
+        );
+    }
+
+    #[test]
+    fn github_owner_from_https_style_path() {
+        assert_eq!(
+            github_owner_from_git_path(b"/HenriTEL/gitblog.git").unwrap(),
+            "HenriTEL"
+        );
+    }
+
+    #[test]
+    fn github_owner_from_scp_style_path() {
+        assert_eq!(
+            github_owner_from_git_path(b"HenriTEL/gitblog").unwrap(),
+            "HenriTEL"
+        );
+    }
+
+    #[test]
+    fn github_owner_strips_dot_git_only_on_segment() {
+        assert_eq!(
+            github_owner_from_git_path(b"org-name/repo.name.git").unwrap(),
+            "org-name"
+        );
+    }
+
+    #[test]
+    fn parsed_https_and_ssh_github_urls_yield_same_owner() {
+        let https = gix::Url::from_bytes(BStr::new(b"https://github.com/alice/lab.git")).unwrap();
+        let ssh = gix::Url::from_bytes(BStr::new(b"git@github.com:alice/lab.git")).unwrap();
+        assert_eq!(
+            github_owner_from_git_path(https.path.as_ref()).unwrap(),
+            "alice"
+        );
+        assert_eq!(
+            github_owner_from_git_path(ssh.path.as_ref()).unwrap(),
+            "alice"
+        );
+    }
+
+    #[test]
+    fn is_github_host_accepts_www() {
+        assert!(is_github_dot_com_host("github.com"));
+        assert!(is_github_dot_com_host("WWW.GITHUB.COM"));
+        assert!(is_github_dot_com_host("www.github.com"));
+        assert!(!is_github_dot_com_host("gitlab.com"));
     }
 }
 
@@ -316,11 +492,7 @@ fn refresh_blog_posts_from_markdown(
 }
 
 fn walk_markdown_files(dir: &Path, f: &mut impl FnMut(&Path, &Path)) {
-    fn walk(
-        root: &Path,
-        current: &Path,
-        f: &mut impl FnMut(&Path, &Path),
-    ) {
+    fn walk(root: &Path, current: &Path, f: &mut impl FnMut(&Path, &Path)) {
         let Ok(entries) = std::fs::read_dir(current) else {
             return;
         };
