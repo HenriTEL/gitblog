@@ -19,8 +19,8 @@
     {% include "navbar.html.j2" %}
     <h1>{{ blog_post.title }}</h1>
     <p>
-      {% if blog_post.description -%}
-      {{ blog_post.description }}<br />
+      {%- if blog_post.description_html %}
+      {{- blog_post.description_html | safe }}
       {%- endif %}
       <small>
         Last updated on {{ blog_post.human_time }}

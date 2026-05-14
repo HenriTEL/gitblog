@@ -245,7 +245,7 @@ fn default_client() -> Client {
 }
 
 impl UserProfile for GithubUserProfile {
-    fn fetch_about(&self) -> Result<String, UserProfileError> {
+    fn get_about(&self) -> Result<String, UserProfileError> {
         let html = self.profile_html()?;
         let (_, _, desc) = parse_github_meta(html.as_str());
         let bio = desc
@@ -279,7 +279,7 @@ impl UserProfile for GithubUserProfile {
         })
     }
 
-    fn fetch_username(&self) -> Result<String, UserProfileError> {
+    fn get_username(&self) -> Result<String, UserProfileError> {
         let html = self.profile_html()?;
         let (username, _, _) = parse_github_meta(html.as_str());
         username.ok_or(UserProfileError::MissingMeta("profile:username"))

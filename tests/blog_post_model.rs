@@ -6,6 +6,7 @@ use gitblog::{
     feed::{build_feed_from_blog_posts, generate},
     gemini::write_index_gemtext,
     html::write_index_from_blog_posts,
+    user_profile::UserProfileMeta,
 };
 use tempfile::tempdir;
 
@@ -65,7 +66,12 @@ fn writes_index_from_blog_posts() {
         ),
     ];
 
-    write_index_from_blog_posts(dir.path(), &posts);
+    let profile = UserProfileMeta {
+        username: "author".into(),
+        bio: String::new(),
+    };
+
+    write_index_from_blog_posts(dir.path(), &profile, &posts);
     let html = std::fs::read_to_string(dir.path().join("index.html")).expect("read index");
     assert!(html.contains("Alpha"));
     assert!(html.contains("Zeta"));

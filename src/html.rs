@@ -6,15 +6,22 @@ use serde::Serialize;
 use tera::{Context, Tera};
 
 use crate::blog_post::{BlogPost as DomainBlogPost, fallback_title};
-use crate::markdown::{parse_content_metadata, render_markdown_to_html};
+use crate::markdown::{
+    article_description_html_fragment, article_render_parts, markdown_fragment_to_plain_text,
+    render_markdown_to_html,
+};
 use crate::templates;
+use crate::user_profile::UserProfileMeta;
 
 /// Metadata for a single post, shared by article and index templates.
 #[derive(Debug, Clone, Serialize)]
 pub struct RenderBlogPost {
     pub title: String,
     pub author: String,
+    /// Plain text for `<meta name="description">`, the index listing, and Atom summaries.
     pub description: Option<String>,
+    /// Rendered HTML for the article header lede (may contain inline markup).
+    pub description_html: Option<String>,
     pub creation_dt: DateTime<FixedOffset>,
     pub last_update_dt: DateTime<FixedOffset>,
     pub creation_dt_rfc3339: String,
@@ -36,6 +43,7 @@ struct ArticlePageContext {
 #[derive(Serialize)]
 struct IndexPageContext {
     title: String,
+    author_name: String,
     blog_posts: Vec<RenderBlogPost>,
     feeds: HashMap<String, String>,
     sections: Vec<String>,
@@ -67,7 +75,8 @@ fn file_times(path: &Path) -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
 /// Renders the site index (`index.html.j2`).
 pub fn render_index_html(
     tera: &Tera,
-    page_title: &str,
+    title: String,
+    author_name: String,
     blog_posts: Vec<RenderBlogPost>,
     feeds: HashMap<String, String>,
     sections: Vec<String>,
@@ -75,7 +84,8 @@ pub fn render_index_html(
     social_accounts: HashMap<String, String>,
 ) -> Result<String, tera::Error> {
     let ctx = IndexPageContext {
-        title: page_title.to_string(),
+        title,
+        author_name,
         blog_posts,
         feeds,
         sections,
@@ -88,19 +98,20 @@ pub fn render_index_html(
     )
 }
 
-pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
+pub fn write_index_from_blog_posts(dest: &Path, user_profile: &UserProfileMeta, posts: &[DomainBlogPost]) {
     let mut rendered_posts = posts
         .iter()
         .map(|post| {
             let updated = post.last_updated;
             RenderBlogPost {
                 title: post.title.clone(),
-                author: "Unknown".to_string(),
+                author: user_profile.username.clone(),
                 description: if post.summary.is_empty() {
                     None
                 } else {
-                    Some(post.summary.clone())
+                    Some(markdown_fragment_to_plain_text(&post.summary))
                 },
+                description_html: None,
                 creation_dt: updated,
                 last_update_dt: updated,
                 creation_dt_rfc3339: format_rfc3339_seconds(updated),
@@ -119,7 +130,8 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
     let feeds = HashMap::from([("atom".to_string(), "/atom.xml".to_string())]);
     let html = render_index_html(
         templates::tera(),
-        "Blog",
+        "Home".to_string(),
+        user_profile.username.clone(),
         rendered_posts,
         feeds,
         Vec::new(),
@@ -131,15 +143,14 @@ pub fn write_index_from_blog_posts(dest: &Path, posts: &[DomainBlogPost]) {
 }
 
 /// Converts a Markdown file to a full HTML page using the embedded article template.
-pub fn markdown_file_to_html(markdown_path: &Path, frontmatter_delimiter: &str) {
+pub fn markdown_file_to_html(user_profile: &UserProfileMeta, markdown_path: &Path, frontmatter_delimiter: &str) {
     let md_content = std::fs::read_to_string(markdown_path).expect("read markdown");
     // TODO: use git commit times
     let (created, modified) = file_times(markdown_path);
 
     let fallback_title = fallback_title(markdown_path);
-    let (title, summary, parsed_date) =
-        parse_content_metadata(&md_content, &fallback_title, frontmatter_delimiter);
-    let modified = parsed_date.unwrap_or(modified);
+    let parts = article_render_parts(&md_content, &fallback_title, frontmatter_delimiter);
+    let modified = parts.date.unwrap_or(modified);
 
     let relative_path = format!(
         "{}.html",
@@ -149,14 +160,16 @@ pub fn markdown_file_to_html(markdown_path: &Path, frontmatter_delimiter: &str) 
             .unwrap_or("post")
     );
 
+    let description_plain = markdown_fragment_to_plain_text(&parts.summary_markdown);
     let blog_post = RenderBlogPost {
-        title,
-        author: "Unknown".to_string(),
-        description: if summary.is_empty() {
+        title: parts.title,
+        author: user_profile.username.clone(),
+        description: if description_plain.is_empty() {
             None
         } else {
-            Some(summary)
+            Some(description_plain)
         },
+        description_html: article_description_html_fragment(&parts.summary_markdown),
         creation_dt: created,
         last_update_dt: modified,
         creation_dt_rfc3339: format_rfc3339_seconds(created),
@@ -165,7 +178,7 @@ pub fn markdown_file_to_html(markdown_path: &Path, frontmatter_delimiter: &str) 
         relative_path,
     };
 
-    let main_content = render_markdown_to_html(&md_content, frontmatter_delimiter);
+    let main_content = render_markdown_to_html(&parts.body_markdown, frontmatter_delimiter);
 
     let ctx = ArticlePageContext {
         blog_post,
@@ -194,13 +207,19 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
+    use crate::user_profile::UserProfileMeta;
+
     use super::markdown_file_to_html;
 
     #[test]
     fn markdown_to_full_html_page() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "# Hello\n\nBody **bold**.").unwrap();
-        markdown_file_to_html(f.path(), "---");
+        let profile = UserProfileMeta {
+            username: "tester".into(),
+            bio: String::new(),
+        };
+        markdown_file_to_html(&profile, f.path(), "---");
         let html_path = f.path().with_extension("html");
         let html = std::fs::read_to_string(&html_path).unwrap();
         assert!(html.contains("<!doctype html>"));

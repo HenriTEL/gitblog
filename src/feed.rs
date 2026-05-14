@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::io::Cursor;
 
 use crate::blog_post::BlogPost;
+use crate::markdown::markdown_fragment_to_plain_text;
 
 #[derive(Debug, Deserialize)]
 pub struct Author {
@@ -78,7 +79,7 @@ pub fn build_feed_from_blog_posts(
                     href,
                     rel: "alternate".to_string(),
                 },
-                summary: post.summary.clone(),
+                summary: markdown_fragment_to_plain_text(&post.summary),
             }
         })
         .collect::<Vec<_>>();

@@ -1,16 +1,20 @@
 use std::path::Path;
 
-use crate::blog_post::BlogPost;
+use crate::blog_post::{BlogPost, fallback_title};
+use crate::markdown::article_render_parts;
 
-pub fn markdown_file_to_gemtext(markdown_path: &Path, title: &str) -> std::io::Result<()> {
+pub fn markdown_file_to_gemtext(
+    markdown_path: &Path,
+    frontmatter_delimiter: &str,
+) -> std::io::Result<()> {
     let md_content = std::fs::read_to_string(markdown_path)?;
+    let fb = fallback_title(markdown_path);
+    let parts = article_render_parts(&md_content, &fb, frontmatter_delimiter);
     let mut gemtext = String::new();
-    if !title.trim().is_empty() {
-        gemtext.push_str("# ");
-        gemtext.push_str(title.trim());
-        gemtext.push_str("\n\n");
-    }
-    gemtext.push_str(&markdown_to_gemtext(&md_content));
+    gemtext.push_str("# ");
+    gemtext.push_str(parts.title.trim());
+    gemtext.push_str("\n\n");
+    gemtext.push_str(&markdown_to_gemtext(&parts.body_markdown));
 
     let mut output_path = markdown_path.to_path_buf();
     output_path.set_extension("gmi");
@@ -237,9 +241,9 @@ mod tests {
     #[test]
     fn markdown_file_writes_sibling_gmi() {
         let mut f = NamedTempFile::new().expect("temp file");
-        writeln!(f, "## Hello\n\nBody").expect("write markdown");
+        writeln!(f, "# Custom Title\n\n## Hello\n\nBody").expect("write markdown");
 
-        markdown_file_to_gemtext(f.path(), "Custom Title").expect("generate gemtext file");
+        markdown_file_to_gemtext(f.path(), "").expect("generate gemtext file");
 
         let output_path = f.path().with_extension("gmi");
         let gemtext = std::fs::read_to_string(output_path).expect("read gemtext");

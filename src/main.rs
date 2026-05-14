@@ -6,15 +6,14 @@ use std::{
 
 use chrono::{DateTime, FixedOffset, Utc};
 use gitblog::{
-    blog_post::{BlogPost, fallback_title},
+    blog_post::BlogPost,
     feed,
     gemini::{markdown_file_to_gemtext, write_index_gemtext},
     git::{self, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
     static_content::write_static_content,
     user_profile::{
-        GithubUserProfile, UserProfileDownloadError, UserProfileMeta,
-        download as download_user_profile,
+        download_avatar, GithubUserProfile, UserProfile, UserProfileDownloadError, UserProfileMeta,
     },
 };
 
@@ -73,6 +72,7 @@ impl Error for UpdateProfileError {
 pub fn update_profile(
     repo_uri: &str,
     dest: impl AsRef<Path>,
+    force_full: bool,
 ) -> Result<UserProfileMeta, UpdateProfileError> {
     let url =
         gix::Url::from_bytes(BStr::new(repo_uri.as_bytes())).map_err(UpdateProfileError::GitUrl)?;
@@ -87,29 +87,30 @@ pub fn update_profile(
     }
 
     let host = url.host().unwrap_or("");
-    if !is_github_dot_com_host(host) {
-        return Err(UpdateProfileError::UnsupportedHost(host.to_owned()));
-    }
+    let user_profile = if is_github_dot_com_host(host) {
+        let owner = github_owner_from_git_path(url.path.as_ref())?;
+        Ok(GithubUserProfile::new(owner))
+    } else {
+        Err(UpdateProfileError::UnsupportedHost(host.to_owned()))
+    };
+    let profile = user_profile?;
+    let username = profile
+        .get_username()
+        .map_err(|e| UpdateProfileError::Download(e.into()))?;
+    let bio = profile
+        .get_about()
+        .map_err(|e| UpdateProfileError::Download(e.into()))?;
 
-    let owner = github_owner_from_git_path(url.path.as_ref())?;
-    download_user_profile(&GithubUserProfile::new(owner), dest)
-        .map_err(UpdateProfileError::Download)
-}
-
-/// Downloads the repo owner’s avatar and bio unless `force_full` is false and `dest/media/avatar` already exists.
-fn maybe_update_user_profile(force_full: bool, repo_uri: &str, dest: &Path) {
-    let avatar_path = dest.join("media/avatar");
+    let avatar_path = dest.as_ref().join("media").join("avatar");
     if force_full || !avatar_path.is_file() {
-        match update_profile(repo_uri, dest) {
-            Ok(_) => {}
-            Err(e) => log::warn!("could not update user profile: {e}"),
-        }
+        download_avatar(&profile, &avatar_path).map_err(UpdateProfileError::Download)?;
     } else {
         log::debug!(
             "skipping user profile update; {} already exists and --full was not passed",
             avatar_path.display()
         );
     }
+    Ok(UserProfileMeta { username, bio })
 }
 
 fn is_github_dot_com_host(host: &str) -> bool {
@@ -210,7 +211,7 @@ fn main() {
             let dest = remote
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
-            maybe_update_user_profile(args.full, &args.repo, dest.as_ref());
+            let user_profile = update_profile(&args.repo, <PathBuf as AsRef<Path>>::as_ref(&dest), args.full).expect("update profile");
             refresh_blog_posts_from_markdown(
                 &dest,
                 &updated_file_blobs,
@@ -218,13 +219,13 @@ fn main() {
                 &args.frontmatter_delimiter,
             );
             let posts = git::all_blog_posts();
-            render_markdown_files(&dest, &posts, &args.frontmatter_delimiter, args.gemini);
+            render_markdown_files(&user_profile, &dest, &posts, &args.frontmatter_delimiter, args.gemini);
             let generated_feed =
                 feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
             let xml = feed::generate(&generated_feed).expect("generate atom feed");
             std::fs::write(dest.join("atom.xml"), &xml).expect("write atom feed");
             println!("wrote atom.xml");
-            write_index_from_blog_posts(&dest, &posts);
+            write_index_from_blog_posts(&dest, &user_profile, &posts);
             println!("wrote index.html");
             if args.gemini {
                 write_index_gemtext(&dest, &posts).expect("write gemini index");
@@ -244,24 +245,17 @@ fn main() {
 }
 
 fn render_markdown_files(
+    user_profile: &UserProfileMeta,
     dest: &Path,
-    posts: &[BlogPost],
+    _posts: &[BlogPost],
     frontmatter_delimiter: &str,
     with_gemini: bool,
 ) {
-    let post_titles = posts
-        .iter()
-        .map(|post| (post.path.clone(), post.title.clone()))
-        .collect::<std::collections::HashMap<_, _>>();
     walk_markdown_files(dest, &mut |abs, rel| {
-        markdown_file_to_html(abs, frontmatter_delimiter);
+        markdown_file_to_html(&user_profile, abs, frontmatter_delimiter);
         println!("wrote {} ", rel.with_extension("html").to_string_lossy());
         if with_gemini {
-            let title = post_titles
-                .get(rel)
-                .cloned()
-                .unwrap_or_else(|| fallback_title(rel));
-            markdown_file_to_gemtext(abs, &title).expect("write gemtext");
+            markdown_file_to_gemtext(abs, frontmatter_delimiter).expect("write gemtext");
             println!("wrote {} ", rel.with_extension("gmi").to_string_lossy());
         }
         std::fs::remove_file(abs).expect("remove rendered markdown");
@@ -306,6 +300,8 @@ mod tests {
         CliArgs, collect_updated_file_blobs, github_owner_from_git_path, is_github_dot_com_host,
         render_markdown_files,
     };
+    use gitblog::blog_post::BlogPost;
+    use gitblog::user_profile::UserProfileMeta;
     use clap::Parser;
     use tempfile::tempdir;
 
@@ -362,7 +358,16 @@ mod tests {
         let mut source = std::fs::File::create(&markdown_path).expect("create markdown");
         writeln!(source, "# Post").expect("write markdown");
 
-        render_markdown_files(dir.path(), &[], "---", false);
+        render_markdown_files(
+            &UserProfileMeta {
+                username: "u".into(),
+                bio: String::new(),
+            },
+            dir.path(),
+            &[] as &[BlogPost],
+            "---",
+            false,
+        );
 
         assert!(!markdown_path.exists(), "markdown should be removed");
         assert!(
@@ -378,7 +383,16 @@ mod tests {
         let mut source = std::fs::File::create(&markdown_path).expect("create markdown");
         writeln!(source, "# Post").expect("write markdown");
 
-        render_markdown_files(dir.path(), &[], "---", true);
+        render_markdown_files(
+            &UserProfileMeta {
+                username: "u".into(),
+                bio: String::new(),
+            },
+            dir.path(),
+            &[] as &[BlogPost],
+            "---",
+            true,
+        );
 
         assert!(!markdown_path.exists(), "markdown should be removed");
         assert!(

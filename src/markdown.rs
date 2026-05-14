@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
-use comrak::{Arena, Options, markdown_to_html, nodes::NodeValue, parse_document};
+use comrak::{Options, markdown_to_html};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
@@ -19,25 +19,6 @@ fn frontmatter_delimiter_option(frontmatter_delimiter: &str) -> Option<String> {
         None
     } else {
         Some(frontmatter_delimiter.to_string())
-    }
-}
-
-fn parse_frontmatter(markdown: &str, frontmatter_delimiter: &str) -> Frontmatter {
-    let mut options = Options::default();
-    options.extension.front_matter_delimiter = frontmatter_delimiter_option(frontmatter_delimiter);
-
-    let arena = Arena::new();
-    let root = parse_document(&arena, markdown, &options);
-    for node in root.children() {
-        if let NodeValue::FrontMatter(raw) = &node.data.borrow().value {
-            return parse_frontmatter_fields(raw);
-        }
-    }
-
-    Frontmatter {
-        title: None,
-        description: None,
-        date: None,
     }
 }
 
@@ -120,16 +101,276 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
     (title, quote_lines.join("\n"))
 }
 
+/// YAML / metadata block without delimiters, paired with markdown body after the closing delimiter.
+fn split_frontmatter_raw(markdown: &str, delimiter: &str) -> (String, String) {
+    let d = delimiter.trim();
+    if d.is_empty() {
+        return (String::new(), markdown.to_string());
+    }
+    let lines: Vec<&str> = markdown.lines().collect();
+    if lines.is_empty() || lines[0].trim() != d {
+        return (String::new(), markdown.to_string());
+    }
+    let mut close_idx = None;
+    for i in 1..lines.len() {
+        if lines[i].trim() == d {
+            close_idx = Some(i);
+            break;
+        }
+    }
+    let Some(close) = close_idx else {
+        return (String::new(), markdown.to_string());
+    };
+    let fm_inner = lines[1..close].join("\n");
+    let rest = lines[close + 1..].join("\n");
+    (fm_inner, rest)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BodySummaryKind {
+    None,
+    /// De-quoted lines joined with `\n`, same shape as [`parse_title_and_summary`].
+    Blockquote { start: usize, end: usize, markdown: String },
+    /// First paragraph after the title when it reads like a TL;DR lede.
+    TldrParagraph { start: usize, end: usize, markdown: String },
+}
+
+/// Title, summary markdown, optional date, and markdown for `<main>` (leading title / lede removed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleRenderParts {
+    pub title: String,
+    pub summary_markdown: String,
+    pub date: Option<DateTime<FixedOffset>>,
+    pub body_markdown: String,
+}
+
+fn line_looks_like_tldr_lede(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("tl;dr") || lower.contains("tldr")
+}
+
+fn parse_body_intro(lines: &[&str], fallback_title: &str) -> (String, Option<usize>, BodySummaryKind) {
+    let mut i = 0usize;
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    if i >= lines.len() {
+        return (fallback_title.to_string(), None, BodySummaryKind::None);
+    }
+
+    let trimmed = lines[i].trim();
+    let mut h1_idx = None;
+    let mut body_title = fallback_title.to_string();
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        if !rest.starts_with('#') {
+            body_title = rest.trim().to_string();
+            h1_idx = Some(i);
+            i += 1;
+        }
+    }
+
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+
+    if i >= lines.len() {
+        return (body_title, h1_idx, BodySummaryKind::None);
+    }
+
+    if lines[i].trim_start().starts_with('>') {
+        let start = i;
+        let mut dequoted = Vec::new();
+        while i < lines.len() {
+            let t = lines[i].trim();
+            if let Some(rest) = t.strip_prefix('>') {
+                let content = rest.strip_prefix(' ').unwrap_or(rest);
+                dequoted.push(content.to_string());
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if dequoted.is_empty() {
+            return (body_title, h1_idx, BodySummaryKind::None);
+        }
+        let end = i - 1;
+        let markdown = dequoted.join("\n");
+        return (
+            body_title,
+            h1_idx,
+            BodySummaryKind::Blockquote {
+                start,
+                end,
+                markdown,
+            },
+        );
+    }
+
+    // First paragraph run (until blank line).
+    let start = i;
+    let mut para = Vec::new();
+    while i < lines.len() && !lines[i].trim().is_empty() {
+        para.push(lines[i]);
+        i += 1;
+    }
+    let joined = para.join("\n");
+    if joined.is_empty() || !line_looks_like_tldr_lede(&joined) {
+        return (body_title, h1_idx, BodySummaryKind::None);
+    }
+    let end = i - 1;
+    (
+        body_title,
+        h1_idx,
+        BodySummaryKind::TldrParagraph {
+            start,
+            end,
+            markdown: joined,
+        },
+    )
+}
+
+fn build_body_markdown_after_strip(
+    rest_lines: &[&str],
+    h1_idx: Option<usize>,
+    body_summary: &BodySummaryKind,
+    strip_body_summary: bool,
+) -> String {
+    let mut skip = std::collections::HashSet::new();
+    if let Some(idx) = h1_idx {
+        skip.insert(idx);
+    }
+    if strip_body_summary {
+        match body_summary {
+            BodySummaryKind::Blockquote { start, end, .. }
+            | BodySummaryKind::TldrParagraph { start, end, .. } => {
+                for line in *start..=*end {
+                    skip.insert(line);
+                }
+            }
+            BodySummaryKind::None => {}
+        }
+    }
+    let out: Vec<&str> = rest_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| if skip.contains(&idx) { None } else { Some(*line) })
+        .collect();
+    out.join("\n").trim().to_string()
+}
+
+/// Parses front matter and body intro, then returns metadata plus markdown for the article body
+/// without the displayed title and lede (blockquote summary, TL;DR paragraph, or nothing when
+/// description comes only from front matter).
+pub fn article_render_parts(
+    markdown: &str,
+    fallback_title: &str,
+    frontmatter_delimiter: &str,
+) -> ArticleRenderParts {
+    let (fm_inner, rest) = split_frontmatter_raw(markdown, frontmatter_delimiter);
+    let frontmatter = parse_frontmatter_fields(&fm_inner);
+    let rest_lines: Vec<&str> = rest.lines().collect();
+    let (body_title, h1_idx, body_summary_kind) =
+        parse_body_intro(&rest_lines, fallback_title);
+
+    let title = frontmatter
+        .title
+        .clone()
+        .unwrap_or_else(|| body_title.clone());
+
+    let summary_from_body = match &body_summary_kind {
+        BodySummaryKind::Blockquote { markdown, .. } | BodySummaryKind::TldrParagraph { markdown, .. } => {
+            markdown.clone()
+        }
+        BodySummaryKind::None => String::new(),
+    };
+
+    let summary_markdown = frontmatter
+        .description
+        .clone()
+        .unwrap_or(summary_from_body);
+
+    let strip_body_summary = frontmatter.description.is_none()
+        && !matches!(body_summary_kind, BodySummaryKind::None);
+
+    let body_markdown = build_body_markdown_after_strip(
+        &rest_lines,
+        h1_idx,
+        &body_summary_kind,
+        strip_body_summary,
+    );
+
+    ArticleRenderParts {
+        title,
+        summary_markdown,
+        date: frontmatter.date,
+        body_markdown,
+    }
+}
+
 pub fn parse_content_metadata(
     markdown: &str,
     fallback_title: &str,
     frontmatter_delimiter: &str,
 ) -> (String, String, Option<DateTime<FixedOffset>>) {
-    let frontmatter = parse_frontmatter(markdown, frontmatter_delimiter);
-    let (body_title, body_summary) = parse_title_and_summary(markdown, fallback_title);
-    let title = frontmatter.title.unwrap_or(body_title);
-    let summary = frontmatter.description.unwrap_or(body_summary);
-    (title, summary, frontmatter.date)
+    let parts = article_render_parts(markdown, fallback_title, frontmatter_delimiter);
+    (parts.title, parts.summary_markdown, parts.date)
+}
+
+/// Renders a short markdown fragment (no front matter) to HTML.
+pub fn render_markdown_fragment_to_html(markdown: &str) -> String {
+    render_markdown_to_html(markdown, "")
+}
+
+/// If `html` is a single top-level `<p>…</p>` from comrak, returns the inner HTML for embedding.
+pub fn unwrap_single_paragraph_html(html: &str) -> String {
+    let t = html.trim();
+    let Some(rest) = t.strip_prefix("<p>") else {
+        return t.to_string();
+    };
+    let Some(inner) = rest.strip_suffix("</p>") else {
+        return t.to_string();
+    };
+    if inner.contains("</p>") {
+        return t.to_string();
+    }
+    inner.trim().to_string()
+}
+
+/// Plain text suitable for `<meta name="description">` and Atom summaries.
+pub fn markdown_fragment_to_plain_text(markdown: &str) -> String {
+    if markdown.trim().is_empty() {
+        return String::new();
+    }
+    let html = render_markdown_fragment_to_html(markdown);
+    strip_html_tags_collapse_ws(&html)
+}
+
+fn strip_html_tags_collapse_ws(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn article_description_html_fragment(summary_markdown: &str) -> Option<String> {
+    let t = summary_markdown.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let html = render_markdown_fragment_to_html(t);
+    let inner = unwrap_single_paragraph_html(&html);
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner)
+    }
 }
 
 pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> String {
@@ -148,7 +389,9 @@ pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> S
 mod tests {
     use chrono::{Datelike, Timelike};
 
-    use super::{parse_content_metadata, parse_title_and_summary, render_markdown_to_html};
+    use super::{
+        article_render_parts, parse_content_metadata, parse_title_and_summary, render_markdown_to_html,
+    };
 
     #[test]
     fn extracts_title_and_multiline_summary() {
@@ -249,5 +492,48 @@ description: Uses custom delimiter
         assert_eq!(title, "Custom");
         assert_eq!(summary, "Uses custom delimiter");
         assert!(date.is_none());
+    }
+
+    #[test]
+    fn article_render_parts_strips_h1_and_blockquote_from_main() {
+        let md = "# Hello\n\n> Line one\n> Line two\n\nBody";
+        let p = article_render_parts(md, "fallback", "");
+        assert_eq!(p.title, "Hello");
+        assert_eq!(p.summary_markdown, "Line one\nLine two");
+        assert_eq!(p.body_markdown, "Body");
+    }
+
+    #[test]
+    fn article_render_parts_keeps_blockquote_in_body_when_description_is_frontmatter() {
+        let md = r#"---
+description: From YAML
+---
+# Body Title
+
+> Body summary
+
+Rest
+"#;
+        let p = article_render_parts(md, "fallback", "---");
+        assert_eq!(p.summary_markdown, "From YAML");
+        assert!(p.body_markdown.contains("> Body summary"));
+        assert!(p.body_markdown.contains("Rest"));
+    }
+
+    #[test]
+    fn article_render_parts_strips_tldr_lede_paragraph() {
+        let md = "# Paginate\n\n**TL;DR** One line.\n\nDetails here.";
+        let p = article_render_parts(md, "fallback", "");
+        assert_eq!(p.title, "Paginate");
+        assert_eq!(p.summary_markdown, "**TL;DR** One line.");
+        assert_eq!(p.body_markdown, "Details here.");
+    }
+
+    #[test]
+    fn article_render_parts_keeps_first_paragraph_in_main_when_not_tldr() {
+        let md = "# Hi\n\nIntro without keyword.\n\nMore.";
+        let p = article_render_parts(md, "fallback", "");
+        assert_eq!(p.summary_markdown, "");
+        assert!(p.body_markdown.contains("Intro without keyword"));
     }
 }
