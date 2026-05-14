@@ -1,6 +1,6 @@
 # gitblog
 
-An individual blog generator.
+A blog generator.
 
 ## Dev Quickstart
 
