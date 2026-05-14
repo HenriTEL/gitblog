@@ -130,9 +130,17 @@ fn split_frontmatter_raw(markdown: &str, delimiter: &str) -> (String, String) {
 enum BodySummaryKind {
     None,
     /// De-quoted lines joined with `\n`, same shape as [`parse_title_and_summary`].
-    Blockquote { start: usize, end: usize, markdown: String },
+    Blockquote {
+        start: usize,
+        end: usize,
+        markdown: String,
+    },
     /// First paragraph after the title when it reads like a TL;DR lede.
-    TldrParagraph { start: usize, end: usize, markdown: String },
+    TldrParagraph {
+        start: usize,
+        end: usize,
+        markdown: String,
+    },
 }
 
 /// Title, summary markdown, optional date, and markdown for `<main>` (leading title / lede removed).
@@ -149,7 +157,10 @@ fn line_looks_like_tldr_lede(text: &str) -> bool {
     lower.contains("tl;dr") || lower.contains("tldr")
 }
 
-fn parse_body_intro(lines: &[&str], fallback_title: &str) -> (String, Option<usize>, BodySummaryKind) {
+fn parse_body_intro(
+    lines: &[&str],
+    fallback_title: &str,
+) -> (String, Option<usize>, BodySummaryKind) {
     let mut i = 0usize;
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
@@ -253,7 +264,13 @@ fn build_body_markdown_after_strip(
     let out: Vec<&str> = rest_lines
         .iter()
         .enumerate()
-        .filter_map(|(idx, line)| if skip.contains(&idx) { None } else { Some(*line) })
+        .filter_map(|(idx, line)| {
+            if skip.contains(&idx) {
+                None
+            } else {
+                Some(*line)
+            }
+        })
         .collect();
     out.join("\n").trim().to_string()
 }
@@ -269,8 +286,7 @@ pub fn article_render_parts(
     let (fm_inner, rest) = split_frontmatter_raw(markdown, frontmatter_delimiter);
     let frontmatter = parse_frontmatter_fields(&fm_inner);
     let rest_lines: Vec<&str> = rest.lines().collect();
-    let (body_title, h1_idx, body_summary_kind) =
-        parse_body_intro(&rest_lines, fallback_title);
+    let (body_title, h1_idx, body_summary_kind) = parse_body_intro(&rest_lines, fallback_title);
 
     let title = frontmatter
         .title
@@ -278,19 +294,15 @@ pub fn article_render_parts(
         .unwrap_or_else(|| body_title.clone());
 
     let summary_from_body = match &body_summary_kind {
-        BodySummaryKind::Blockquote { markdown, .. } | BodySummaryKind::TldrParagraph { markdown, .. } => {
-            markdown.clone()
-        }
+        BodySummaryKind::Blockquote { markdown, .. }
+        | BodySummaryKind::TldrParagraph { markdown, .. } => markdown.clone(),
         BodySummaryKind::None => String::new(),
     };
 
-    let summary_markdown = frontmatter
-        .description
-        .clone()
-        .unwrap_or(summary_from_body);
+    let summary_markdown = frontmatter.description.clone().unwrap_or(summary_from_body);
 
-    let strip_body_summary = frontmatter.description.is_none()
-        && !matches!(body_summary_kind, BodySummaryKind::None);
+    let strip_body_summary =
+        frontmatter.description.is_none() && !matches!(body_summary_kind, BodySummaryKind::None);
 
     let body_markdown = build_body_markdown_after_strip(
         &rest_lines,
@@ -366,11 +378,7 @@ pub fn article_description_html_fragment(summary_markdown: &str) -> Option<Strin
     }
     let html = render_markdown_fragment_to_html(t);
     let inner = unwrap_single_paragraph_html(&html);
-    if inner.is_empty() {
-        None
-    } else {
-        Some(inner)
-    }
+    if inner.is_empty() { None } else { Some(inner) }
 }
 
 pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> String {
@@ -390,7 +398,8 @@ mod tests {
     use chrono::{Datelike, Timelike};
 
     use super::{
-        article_render_parts, parse_content_metadata, parse_title_and_summary, render_markdown_to_html,
+        article_render_parts, parse_content_metadata, parse_title_and_summary,
+        render_markdown_to_html,
     };
 
     #[test]

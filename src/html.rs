@@ -98,7 +98,11 @@ pub fn render_index_html(
     )
 }
 
-pub fn write_index_from_blog_posts(dest: &Path, user_profile: &UserProfileMeta, posts: &[DomainBlogPost]) {
+pub fn write_index_from_blog_posts(
+    dest: &Path,
+    user_profile: &UserProfileMeta,
+    posts: &[DomainBlogPost],
+) {
     let mut rendered_posts = posts
         .iter()
         .map(|post| {
@@ -143,7 +147,11 @@ pub fn write_index_from_blog_posts(dest: &Path, user_profile: &UserProfileMeta, 
 }
 
 /// Converts a Markdown file to a full HTML page using the embedded article template.
-pub fn markdown_file_to_html(user_profile: &UserProfileMeta, markdown_path: &Path, frontmatter_delimiter: &str) {
+pub fn markdown_file_to_html(
+    user_profile: &UserProfileMeta,
+    markdown_path: &Path,
+    frontmatter_delimiter: &str,
+) {
     let md_content = std::fs::read_to_string(markdown_path).expect("read markdown");
     // TODO: use git commit times
     let (created, modified) = file_times(markdown_path);

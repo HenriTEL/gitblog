@@ -13,7 +13,7 @@ use gitblog::{
     html::{markdown_file_to_html, write_index_from_blog_posts},
     static_content::write_static_content,
     user_profile::{
-        download_avatar, GithubUserProfile, UserProfile, UserProfileDownloadError, UserProfileMeta,
+        GithubUserProfile, UserProfile, UserProfileDownloadError, UserProfileMeta, download_avatar,
     },
 };
 
@@ -211,7 +211,12 @@ fn main() {
             let dest = remote
                 .pull_files(&updated_file_blobs, None)
                 .expect("fetch blobs");
-            let user_profile = update_profile(&args.repo, <PathBuf as AsRef<Path>>::as_ref(&dest), args.full).expect("update profile");
+            let user_profile = update_profile(
+                &args.repo,
+                <PathBuf as AsRef<Path>>::as_ref(&dest),
+                args.full,
+            )
+            .expect("update profile");
             refresh_blog_posts_from_markdown(
                 &dest,
                 &updated_file_blobs,
@@ -219,7 +224,13 @@ fn main() {
                 &args.frontmatter_delimiter,
             );
             let posts = git::all_blog_posts();
-            render_markdown_files(&user_profile, &dest, &posts, &args.frontmatter_delimiter, args.gemini);
+            render_markdown_files(
+                &user_profile,
+                &dest,
+                &posts,
+                &args.frontmatter_delimiter,
+                args.gemini,
+            );
             let generated_feed =
                 feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed.as_ref());
             let xml = feed::generate(&generated_feed).expect("generate atom feed");
@@ -300,9 +311,9 @@ mod tests {
         CliArgs, collect_updated_file_blobs, github_owner_from_git_path, is_github_dot_com_host,
         render_markdown_files,
     };
+    use clap::Parser;
     use gitblog::blog_post::BlogPost;
     use gitblog::user_profile::UserProfileMeta;
-    use clap::Parser;
     use tempfile::tempdir;
 
     #[test]
