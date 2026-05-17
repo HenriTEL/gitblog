@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gix::revision::walk::Sorting;
+
 use gix::bstr::{BString, ByteSlice};
 use gix::objs::Tree;
 use gix::objs::{CommitRef, TreeRef};
@@ -34,6 +36,12 @@ pub enum State {
 /// A remote git repository identified by a URL and a branch name.
 pub struct GitRemote {
     pub url: Url,
+    pub branch: String,
+}
+
+/// A local git repository on disk.
+pub struct GitLocal {
+    pub repo_root: PathBuf,
     pub branch: String,
 }
 
@@ -109,6 +117,148 @@ pub fn update_blog_post_from_markdown_path(
 
 pub fn all_blog_posts() -> Vec<BlogPost> {
     blog_post::all()
+}
+
+fn branch_commit_id(
+    repo: &gix::Repository,
+    branch: &str,
+) -> Result<gix::ObjectId, Box<dyn std::error::Error>> {
+    let ref_name = format!("refs/heads/{}", branch);
+    let mut reference = repo
+        .find_reference(&ref_name)
+        .map_err(|e| format!("reference {ref_name}: {e}"))?;
+    let id = reference
+        .peel_to_id_in_place()
+        .map_err(|e| format!("peel {ref_name}: {e}"))?;
+    Ok(id.detach())
+}
+
+fn commit_time_from_commit(commit: &gix::Commit<'_>) -> DateTime<FixedOffset> {
+    let sig = commit.committer().expect("committer");
+    let time = sig.time;
+    let offset =
+        FixedOffset::east_opt(time.offset).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    DateTime::from_timestamp(time.seconds, 0)
+        .expect("valid commit timestamp")
+        .with_timezone(&offset)
+}
+
+fn cache_tree_oid(oid: gix::ObjectId, tree: Tree) {
+    TREE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(oid, tree);
+    });
+}
+
+fn load_tree(
+    repo: &gix::Repository,
+    tree_oid: gix::ObjectId,
+) -> Result<Tree, Box<dyn std::error::Error>> {
+    if let Some(tree) = cached_tree(&tree_oid) {
+        return Ok(tree);
+    }
+    let obj = repo
+        .find_object(tree_oid)
+        .map_err(|e| format!("find tree {tree_oid}: {e}"))?;
+    let tree_ref = TreeRef::from_bytes(obj.data.as_ref())?;
+    let tree = Tree::from(tree_ref);
+    cache_tree_oid(tree_oid, tree.clone());
+    Ok(tree)
+}
+
+/// Write every file under `tree_oid` (recursive) into `dest_root` from a local object database.
+fn write_tree_from_repo(
+    repo: &gix::Repository,
+    dest_root: &Path,
+    tree_oid: gix::ObjectId,
+    relative: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = load_tree(repo, tree_oid)?;
+    for entry in &tree.entries {
+        let path = relative.join(entry.filename.to_str_lossy().as_ref());
+        if crate::path_is_ignored(&path, entry.mode.is_tree()) {
+            continue;
+        }
+        if entry.mode.is_tree() {
+            let dir_at = dest_root.join(&path);
+            fs::create_dir_all(&dir_at)?;
+            write_tree_from_repo(repo, dest_root, entry.oid, &path)?;
+        } else if entry.mode.is_blob() || entry.mode.is_executable() || entry.mode.is_link() {
+            let blob = repo
+                .find_object(entry.oid)
+                .map_err(|e| format!("find blob {}: {e}", entry.oid))?;
+            let data = blob.data.to_vec();
+            let out_path = dest_root.join(&path);
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(out_path, &data)?;
+        }
+    }
+    Ok(())
+}
+
+fn temp_dest_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(std::env::temp_dir().join(format!(
+        "gitblog-files-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    )))
+}
+
+/// Copy blog-relevant files from a worktree into `destination` or a fresh temp directory.
+pub fn materialize_worktree_copy(
+    repo: &gix::Repository,
+    destination: Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dest = match destination {
+        Some(path) => path,
+        None => temp_dest_dir()?,
+    };
+    fs::create_dir_all(&dest)?;
+
+    let source_base = repo
+        .worktree()
+        .map(|wt| wt.base().to_path_buf())
+        .unwrap_or_else(|| repo.path().to_path_buf());
+
+    copy_worktree_files(&source_base, &source_base, &dest)?;
+    Ok(dest)
+}
+
+fn worktree_copy_is_skipped(rel: &Path, is_dir: bool) -> bool {
+    if rel
+        .components()
+        .next()
+        .is_some_and(|c| c.as_os_str() == ".git")
+    {
+        return true;
+    }
+    crate::path_is_ignored(rel, is_dir)
+}
+
+fn copy_worktree_files(
+    root: &Path,
+    current: &Path,
+    dest: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root)?;
+        if worktree_copy_is_skipped(rel, path.is_dir()) {
+            continue;
+        }
+        let out = dest.join(rel);
+        if path.is_dir() {
+            fs::create_dir_all(&out)?;
+            copy_worktree_files(root, &path, dest)?;
+        } else {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&path, &out)?;
+        }
+    }
+    Ok(())
 }
 
 /// Write every file under `tree_oid` (recursive) into `dest_root`, using objects from a decoded pack.
@@ -553,132 +703,266 @@ impl GitRemote {
     }
 
     /// Compute the difference between two trees.
-    /// Return a map of file paths to their state and the OID of the new file if it was created or modified.
     pub fn tree_diff(
         &self,
         from: &Tree,
         to: &Tree,
     ) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)> {
-        let mut result: HashMap<PathBuf, (State, Option<gix::ObjectId>)> = HashMap::new();
-        let mut queue: VecDeque<(PathBuf, Option<Tree>, Option<Tree>)> = VecDeque::new();
-        queue.push_back((PathBuf::new(), Some(from.clone()), Some(to.clone())));
+        tree_diff(from, to)
+    }
+}
 
-        while let Some((base_path, left_opt, right_opt)) = queue.pop_front() {
-            match (left_opt, right_opt) {
-                (Some(left), Some(right)) => {
-                    let mut left_entries: HashMap<_, _> = HashMap::new();
-                    for entry in &left.entries {
-                        left_entries.insert(entry.filename.clone(), entry.clone());
-                    }
+impl GitLocal {
+    fn open(&self) -> Result<gix::Repository, Box<dyn std::error::Error>> {
+        Ok(gix::discover(&self.repo_root)?)
+    }
 
-                    let mut right_entries: HashMap<_, _> = HashMap::new();
-                    for entry in &right.entries {
-                        right_entries.insert(entry.filename.clone(), entry.clone());
-                    }
+    pub fn tree_diff(
+        &self,
+        from: &Tree,
+        to: &Tree,
+    ) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)> {
+        tree_diff(from, to)
+    }
 
-                    for (name, left_entry) in &left_entries {
-                        let file_name = name.to_str_lossy();
-                        let mut full_path = base_path.clone();
-                        full_path.push(file_name.as_ref());
+    pub fn pull_files(
+        &self,
+        blobs: &[FileBlob],
+        destination: Option<PathBuf>,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let repo = self.open()?;
+        let dest = match destination {
+            Some(path) => path,
+            None => temp_dest_dir()?,
+        };
+        fs::create_dir_all(&dest)?;
 
-                        match right_entries.get(name) {
-                            None => {
-                                if left_entry.mode.is_tree() {
-                                    queue.push_back((
-                                        full_path,
-                                        cached_tree(&left_entry.oid),
-                                        None,
-                                    ));
-                                } else {
-                                    result.insert(full_path, (State::Deleted, None));
-                                }
-                            }
-                            Some(right_entry) => {
-                                if left_entry.oid == right_entry.oid {
-                                    // If tree OIDs match, descendants are identical: skip subtree.
-                                    continue;
-                                }
-
-                                match (left_entry.mode.is_tree(), right_entry.mode.is_tree()) {
-                                    (true, true) => {
-                                        queue.push_back((
-                                            full_path.clone(),
-                                            cached_tree(&left_entry.oid),
-                                            cached_tree(&right_entry.oid),
-                                        ));
-                                    }
-                                    (false, false) => {
-                                        result.insert(
-                                            full_path,
-                                            (State::Modified, Some(right_entry.oid)),
-                                        );
-                                    }
-                                    (true, false) => {
-                                        queue.push_back((
-                                            full_path.clone(),
-                                            cached_tree(&left_entry.oid),
-                                            None,
-                                        ));
-                                        result.insert(
-                                            full_path,
-                                            (State::Created, Some(right_entry.oid)),
-                                        );
-                                    }
-                                    (false, true) => {
-                                        result.insert(full_path.clone(), (State::Deleted, None));
-                                        queue.push_back((
-                                            full_path,
-                                            None,
-                                            cached_tree(&right_entry.oid),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    for (name, right_entry) in &right_entries {
-                        if left_entries.contains_key(name) {
-                            continue;
-                        }
-
-                        let file_name = name.to_str_lossy();
-                        let mut full_path = base_path.clone();
-                        full_path.push(file_name.as_ref());
-
-                        if right_entry.mode.is_tree() {
-                            queue.push_back((full_path, None, cached_tree(&right_entry.oid)));
-                        } else {
-                            result.insert(full_path, (State::Created, Some(right_entry.oid)));
-                        }
-                    }
+        if blobs.is_empty() {
+            let head_id = branch_commit_id(&repo, &self.branch)?;
+            let commit = repo
+                .find_object(head_id)
+                .map_err(|e| format!("find commit {head_id}: {e}"))?;
+            let commit = commit.into_commit();
+            let tree_id = commit.tree_id()?.detach();
+            write_tree_from_repo(&repo, &dest, tree_id, Path::new(""))?;
+        } else {
+            for blob in blobs {
+                let object = repo
+                    .find_object(blob.oid)
+                    .map_err(|e| format!("find blob {}: {e}", blob.oid))?;
+                let out_path = dest.join(&blob.file_path);
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-                (Some(left), None) => {
-                    for entry in &left.entries {
-                        let mut full_path = base_path.clone();
-                        full_path.push(entry.filename.to_str_lossy().as_ref());
-                        if entry.mode.is_tree() {
-                            queue.push_back((full_path, cached_tree(&entry.oid), None));
-                        } else {
-                            result.insert(full_path, (State::Deleted, None));
-                        }
-                    }
-                }
-                (None, Some(right)) => {
-                    for entry in &right.entries {
-                        let mut full_path = base_path.clone();
-                        full_path.push(entry.filename.to_str_lossy().as_ref());
-                        if entry.mode.is_tree() {
-                            queue.push_back((full_path, None, cached_tree(&entry.oid)));
-                        } else {
-                            result.insert(full_path, (State::Created, Some(entry.oid)));
-                        }
-                    }
-                }
-                (None, None) => {}
+                fs::write(out_path, &*object.data)?;
             }
         }
 
-        result
+        Ok(dest)
+    }
+
+    pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
+        let repo = self.open().expect("discover local repo");
+        let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
+
+        let walk = repo
+            .rev_walk([head_id])
+            .sorting(Sorting::ByCommitTime(Default::default()))
+            .all()
+            .expect("rev_walk iterator");
+
+        let mut commit_infos: Vec<(gix::ObjectId, DateTime<FixedOffset>)> = Vec::new();
+
+        for info in walk {
+            let info = info.expect("rev walk item");
+            let commit = info.object().expect("load commit");
+            let dt = commit_time_from_commit(&commit);
+            let tree_id = commit.tree_id().expect("commit tree").detach();
+            commit_infos.push((tree_id, dt));
+            if dt <= *up_to {
+                break;
+            }
+        }
+
+        println!("Fetched {} commits", commit_infos.len());
+
+        for i in 0..commit_infos.len() {
+            let (tree_oid, commit_dt) = &commit_infos[i];
+            let current_tree = load_tree(&repo, *tree_oid).expect("load tree");
+            let parent_tree = if i + 1 < commit_infos.len() {
+                Some(load_tree(&repo, commit_infos[i + 1].0).expect("load parent tree"))
+            } else {
+                None
+            };
+            let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
+            let diff = tree_diff(&from, &current_tree);
+            for (path, (state, maybe_oid)) in &diff {
+                if let (State::Created | State::Modified, Some(oid)) = (state, maybe_oid) {
+                    blog_post::register_object_path(*oid, path.clone(), *commit_dt);
+                    let _ = blog_post::update_by_object_id(
+                        oid,
+                        BlogPostUpdate {
+                            path: Some(path.clone()),
+                            last_updated: Some(*commit_dt),
+                            ..BlogPostUpdate::default()
+                        },
+                    );
+                }
+            }
+        }
+
+        let head_tree = commit_infos
+            .first()
+            .map(|(oid, _)| load_tree(&repo, *oid).expect("head tree"))
+            .unwrap_or_else(|| Tree { entries: vec![] });
+
+        let up_to_tree = commit_infos
+            .last()
+            .and_then(|(oid, dt)| {
+                if *dt <= *up_to {
+                    load_tree(&repo, *oid).ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| Tree { entries: vec![] });
+
+        TreeEnds {
+            up_to_tree,
+            head_tree,
+        }
+    }
+}
+
+/// Compute the difference between two trees.
+pub fn tree_diff(from: &Tree, to: &Tree) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)> {
+    let mut result: HashMap<PathBuf, (State, Option<gix::ObjectId>)> = HashMap::new();
+    let mut queue: VecDeque<(PathBuf, Option<Tree>, Option<Tree>)> = VecDeque::new();
+    queue.push_back((PathBuf::new(), Some(from.clone()), Some(to.clone())));
+
+    while let Some((base_path, left_opt, right_opt)) = queue.pop_front() {
+        match (left_opt, right_opt) {
+            (Some(left), Some(right)) => {
+                let mut left_entries: HashMap<_, _> = HashMap::new();
+                for entry in &left.entries {
+                    left_entries.insert(entry.filename.clone(), entry.clone());
+                }
+
+                let mut right_entries: HashMap<_, _> = HashMap::new();
+                for entry in &right.entries {
+                    right_entries.insert(entry.filename.clone(), entry.clone());
+                }
+
+                for (name, left_entry) in &left_entries {
+                    let file_name = name.to_str_lossy();
+                    let mut full_path = base_path.clone();
+                    full_path.push(file_name.as_ref());
+
+                    match right_entries.get(name) {
+                        None => {
+                            if left_entry.mode.is_tree() {
+                                queue.push_back((full_path, cached_tree(&left_entry.oid), None));
+                            } else {
+                                result.insert(full_path, (State::Deleted, None));
+                            }
+                        }
+                        Some(right_entry) => {
+                            if left_entry.oid == right_entry.oid {
+                                // If tree OIDs match, descendants are identical: skip subtree.
+                                continue;
+                            }
+
+                            match (left_entry.mode.is_tree(), right_entry.mode.is_tree()) {
+                                (true, true) => {
+                                    queue.push_back((
+                                        full_path.clone(),
+                                        cached_tree(&left_entry.oid),
+                                        cached_tree(&right_entry.oid),
+                                    ));
+                                }
+                                (false, false) => {
+                                    result.insert(
+                                        full_path,
+                                        (State::Modified, Some(right_entry.oid)),
+                                    );
+                                }
+                                (true, false) => {
+                                    queue.push_back((
+                                        full_path.clone(),
+                                        cached_tree(&left_entry.oid),
+                                        None,
+                                    ));
+                                    result
+                                        .insert(full_path, (State::Created, Some(right_entry.oid)));
+                                }
+                                (false, true) => {
+                                    result.insert(full_path.clone(), (State::Deleted, None));
+                                    queue.push_back((
+                                        full_path,
+                                        None,
+                                        cached_tree(&right_entry.oid),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (name, right_entry) in &right_entries {
+                    if left_entries.contains_key(name) {
+                        continue;
+                    }
+
+                    let file_name = name.to_str_lossy();
+                    let mut full_path = base_path.clone();
+                    full_path.push(file_name.as_ref());
+
+                    if right_entry.mode.is_tree() {
+                        queue.push_back((full_path, None, cached_tree(&right_entry.oid)));
+                    } else {
+                        result.insert(full_path, (State::Created, Some(right_entry.oid)));
+                    }
+                }
+            }
+            (Some(left), None) => {
+                for entry in &left.entries {
+                    let mut full_path = base_path.clone();
+                    full_path.push(entry.filename.to_str_lossy().as_ref());
+                    if entry.mode.is_tree() {
+                        queue.push_back((full_path, cached_tree(&entry.oid), None));
+                    } else {
+                        result.insert(full_path, (State::Deleted, None));
+                    }
+                }
+            }
+            (None, Some(right)) => {
+                for entry in &right.entries {
+                    let mut full_path = base_path.clone();
+                    full_path.push(entry.filename.to_str_lossy().as_ref());
+                    if entry.mode.is_tree() {
+                        queue.push_back((full_path, None, cached_tree(&entry.oid)));
+                    } else {
+                        result.insert(full_path, (State::Created, Some(entry.oid)));
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::worktree_copy_is_skipped;
+
+    #[test]
+    fn worktree_copy_skips_dot_git() {
+        assert!(worktree_copy_is_skipped(Path::new(".git"), true));
+        assert!(worktree_copy_is_skipped(Path::new(".git/config"), false));
+        assert!(!worktree_copy_is_skipped(Path::new("posts/post.md"), false));
     }
 }
