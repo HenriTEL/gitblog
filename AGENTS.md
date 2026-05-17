@@ -8,7 +8,8 @@
 - `src/lib.rs`: crate module exports and shared constants such as ignored source paths.
 - `src/blog_post.rs`: blog post domain model and markdown-derived metadata updates.
 - `src/feed.rs`: Atom feed parsing, merge/hydration logic, and XML generation.
-- `src/git.rs`: all Git logic, including remote fetch, object decoding, tree diffing, and blob/path metadata indexing.
+- `src/git.rs`: all Git logic, including remote fetch, local repository access (`GitLocal`), object decoding, tree diffing, and blob/path metadata indexing.
+- `src/repo_uri.rs`: parses `repo` CLI values as remote URLs or local paths (`Scheme::File`).
 - `src/html.rs`: HTML page generation and Tera template rendering.
 - `src/markdown.rs`: Markdown parsing and HTML conversion with `comrak`.
 - `src/templates.rs`: Tera environment setup and embedded template loading.
