@@ -197,8 +197,26 @@ pub fn apply_tree_diff_to_blog_posts(
         handled_created.insert(created_path.clone());
     }
 
+    for del_path in &deleted {
+        if handled_deleted.contains(del_path) {
+            continue;
+        }
+        if crate::path_is_ignored(del_path, false) {
+            continue;
+        }
+        if !del_path.extension().is_some_and(|e| e == "md") {
+            continue;
+        }
+        if blog_post::get_by_path(del_path).is_some() {
+            blog_post::remove_by_path(del_path);
+        }
+    }
+
     for (path, oid) in &created {
         if handled_created.contains(path) || crate::path_is_ignored(path, false) {
+            continue;
+        }
+        if !path.extension().is_some_and(|e| e == "md") {
             continue;
         }
         if let Some(existing) = blog_post::get_by_object_id(oid) {
@@ -230,6 +248,9 @@ pub fn apply_tree_diff_to_blog_posts(
 
     for (path, oid) in &modified {
         if crate::path_is_ignored(path, false) {
+            continue;
+        }
+        if !path.extension().is_some_and(|e| e == "md") {
             continue;
         }
         blog_post::register_object_path(*oid, path.clone(), commit_dt);

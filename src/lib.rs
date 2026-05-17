@@ -13,7 +13,7 @@ pub mod static_content;
 pub(crate) mod templates;
 pub mod user_profile;
 
-pub const IGNORE_FILES: &[&str] = &["*.draft.md", "LICENSE.md"];
+pub const IGNORE_FILES: &[&str] = &["**/*.draft.md", "**/draft.md", "LICENSE.md", "README.md"];
 
 pub fn path_is_ignored(relative_path: &Path, is_dir: bool) -> bool {
     let mut builder = GitignoreBuilder::new("/");
@@ -38,9 +38,15 @@ mod tests {
 
     #[test]
     fn path_is_ignored_matches_ignore_patterns() {
-        assert!(path_is_ignored(Path::new("draft"), true));
-        assert!(path_is_ignored(Path::new("draft/post.md"), false));
+        assert!(path_is_ignored(Path::new("hello.draft.md"), false));
+        assert!(path_is_ignored(Path::new("draft/post.draft.md"), false));
+        assert!(path_is_ignored(Path::new("tech/draft.md"), false));
         assert!(path_is_ignored(Path::new("LICENSE.md"), false));
+
         assert!(!path_is_ignored(Path::new("posts/post.md"), false));
+        assert!(!path_is_ignored(
+            Path::new("posts/how-to-write-a-draft.md"),
+            false
+        ));
     }
 }

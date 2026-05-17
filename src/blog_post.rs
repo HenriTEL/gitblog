@@ -356,6 +356,21 @@ pub fn all() -> Vec<BlogPost> {
     BLOG_POST_STORE.with(|store| store.borrow().posts.values().cloned().collect())
 }
 
+pub fn remove_by_path(path: &Path) -> bool {
+    BLOG_POST_STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let Some(store_id) = store.by_path.remove(path) else {
+            return false;
+        };
+        if let Some(post) = store.posts.remove(&store_id) {
+            if let Some(oid) = post.object_id {
+                store.by_object_id.remove(&oid);
+            }
+        }
+        true
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

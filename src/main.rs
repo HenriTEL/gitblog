@@ -513,7 +513,8 @@ fn finish_build(
             &args.frontmatter_delimiter,
         );
     }
-    let posts = publishable_blog_posts(git::all_blog_posts());
+    prune_blog_posts_missing_from_worktree(dest);
+    let posts = publishable_blog_posts(git::all_blog_posts(), dest);
     render_markdown_files(
         user_profile,
         dest,
@@ -842,7 +843,7 @@ mod tests {
             (gitblog::git::State::Modified, Some(keep_oid)),
         );
         diff.insert(
-            PathBuf::from("draft/wip.md"),
+            PathBuf::from("tech/wip.draft.md"),
             (gitblog::git::State::Created, Some(ignored_oid)),
         );
 
@@ -961,11 +962,23 @@ fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
     Ok(feed)
 }
 
-fn publishable_blog_posts(posts: Vec<BlogPost>) -> Vec<BlogPost> {
+fn publishable_blog_posts(posts: Vec<BlogPost>, dest: &Path) -> Vec<BlogPost> {
     posts
         .into_iter()
         .filter(|p| !gitblog::path_is_ignored(&p.path, false))
+        .filter(|p| p.path.extension().is_some_and(|e| e == "md"))
+        .filter(|p| dest.join(&p.path).is_file())
         .collect()
+}
+
+/// Drop store entries whose markdown source is not present in the worktree copy.
+fn prune_blog_posts_missing_from_worktree(dest: &Path) {
+    for post in git::all_blog_posts() {
+        if dest.join(&post.path).is_file() {
+            continue;
+        }
+        gitblog::blog_post::remove_by_path(&post.path);
+    }
 }
 
 fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
