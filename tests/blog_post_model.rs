@@ -54,21 +54,25 @@ fn writes_index_from_blog_posts() {
     let dir = tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("media")).expect("media dir");
 
-    let mut zeta = BlogPost::new(
-        PathBuf::from("notes/zeta.md"),
+    let mut tech_post = BlogPost::new(
+        PathBuf::from("tech/hello-world.md"),
         parse_ts("2026-04-01T10:00:00+02:00"),
-        "Zeta".to_string(),
-        "A summary".to_string(),
+        "Hello World".to_string(),
+        "Tech summary".to_string(),
     );
-    zeta.publication_date = Some(parse_ts("2026-04-01T10:00:00+02:00"));
-    let mut alpha = BlogPost::new(
-        PathBuf::from("notes/alpha.md"),
+    tech_post.publication_date = Some(parse_ts("2026-04-01T10:00:00+02:00"));
+    assert_eq!(tech_post.section.as_deref(), Some("tech"));
+
+    let mut rant_post = BlogPost::new(
+        PathBuf::from("rant/tenant-hell.md"),
         parse_ts("2026-04-03T10:00:00+02:00"),
-        "Alpha".to_string(),
+        "Tenant Hell".to_string(),
         String::new(),
     );
-    alpha.publication_date = Some(parse_ts("2026-04-03T10:00:00+02:00"));
-    let posts = vec![zeta, alpha];
+    rant_post.publication_date = Some(parse_ts("2026-04-03T10:00:00+02:00"));
+    assert_eq!(rant_post.section.as_deref(), Some("rant"));
+
+    let posts = vec![tech_post, rant_post];
 
     let profile = UserProfileMeta {
         username: "author".into(),
@@ -76,17 +80,33 @@ fn writes_index_from_blog_posts() {
     };
 
     write_index_from_blog_posts(dir.path(), &profile, &posts);
-    let html = std::fs::read_to_string(dir.path().join("index.html")).expect("read index");
-    assert!(html.contains("Alpha"));
-    assert!(html.contains("Zeta"));
-    assert!(html.contains("/atom.xml"));
+    let home = std::fs::read_to_string(dir.path().join("index.html")).expect("read index");
+    assert!(home.contains("Hello World"));
+    assert!(home.contains("Tenant Hell"));
+    assert!(home.contains("/atom.xml"));
+    assert!(home.contains(r#"href="/tech""#));
+    assert!(home.contains(r#"href="/rant""#));
+
+    let tech_index =
+        std::fs::read_to_string(dir.path().join("tech/index.html")).expect("read tech index");
+    assert!(tech_index.contains("Hello World"));
+    assert!(!tech_index.contains("Tenant Hell"));
+
+    let rant_index =
+        std::fs::read_to_string(dir.path().join("rant/index.html")).expect("read rant index");
+    assert!(rant_index.contains("Tenant Hell"));
+    assert!(!rant_index.contains("Hello World"));
 
     write_index_gemtext(dir.path(), &posts).expect("write gemini index");
     let gmi = std::fs::read_to_string(dir.path().join("index.gmi")).expect("read gemini index");
     assert!(gmi.contains("# Blog"));
-    assert!(gmi.contains("=> /notes/alpha.gmi Alpha"));
-    assert!(gmi.contains("=> /notes/zeta.gmi Zeta"));
-    let alpha_idx = gmi.find("=> /notes/alpha.gmi Alpha").expect("alpha entry");
-    let zeta_idx = gmi.find("=> /notes/zeta.gmi Zeta").expect("zeta entry");
-    assert!(alpha_idx < zeta_idx);
+    assert!(gmi.contains("=> /rant/tenant-hell.gmi Tenant Hell"));
+    assert!(gmi.contains("=> /tech/hello-world.gmi Hello World"));
+    let rant_idx = gmi
+        .find("=> /rant/tenant-hell.gmi Tenant Hell")
+        .expect("rant entry");
+    let tech_idx = gmi
+        .find("=> /tech/hello-world.gmi Hello World")
+        .expect("tech entry");
+    assert!(rant_idx < tech_idx);
 }

@@ -16,6 +16,8 @@ pub struct BlogPost {
     pub title: String,
     pub summary: String,
     pub path: PathBuf,
+    /// Top-level source folder (e.g. `tech` for `tech/post.md`).
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,6 +49,7 @@ impl BlogPost {
         title: String,
         summary: String,
     ) -> Self {
+        let section = section_from_path(&path);
         Self {
             object_id: None,
             last_updated,
@@ -54,10 +57,12 @@ impl BlogPost {
             title,
             summary,
             path,
+            section,
         }
     }
 
     pub fn with_defaults(path: PathBuf, last_updated: DateTime<FixedOffset>) -> Self {
+        let section = section_from_path(&path);
         Self {
             object_id: None,
             title: fallback_title(&path),
@@ -65,6 +70,7 @@ impl BlogPost {
             path,
             last_updated,
             publication_date: None,
+            section,
         }
     }
 
@@ -79,7 +85,8 @@ impl BlogPost {
         last_updated: DateTime<FixedOffset>,
         path: PathBuf,
     ) {
-        self.path = path;
+        self.path = path.clone();
+        self.section = section_from_path(&path);
         self.last_updated = last_updated;
         self.title = title;
         self.summary = summary;
@@ -92,6 +99,7 @@ impl BlogPost {
         last_updated: DateTime<FixedOffset>,
         publication_date: DateTime<FixedOffset>,
     ) -> Self {
+        let section = section_from_path(&path);
         Self {
             object_id: None,
             path,
@@ -99,6 +107,7 @@ impl BlogPost {
             summary,
             last_updated,
             publication_date: Some(publication_date),
+            section,
         }
     }
 
@@ -134,8 +143,26 @@ impl BlogPost {
         }
         if let Some(path) = update.path {
             self.path = path;
+            self.section = section_from_path(&self.path);
         }
     }
+}
+
+/// Top-level folder name for a markdown source path (`tech/post.md` → `Some("tech")`).
+pub fn section_from_path(path: &Path) -> Option<String> {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .and_then(|p| p.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .map(str::to_owned)
+}
+
+/// Sorted, deduplicated section names from `posts`.
+pub fn collect_sections(posts: &[BlogPost]) -> Vec<String> {
+    let mut sections: Vec<String> = posts.iter().filter_map(|p| p.section.clone()).collect();
+    sections.sort();
+    sections.dedup();
+    sections
 }
 
 pub fn is_draft_md(path: &Path) -> bool {
@@ -181,7 +208,8 @@ impl BlogPostStore {
         }
     }
 
-    fn upsert_post(&mut self, post: BlogPost) -> BlogPost {
+    fn upsert_post(&mut self, mut post: BlogPost) -> BlogPost {
+        post.section = section_from_path(&post.path);
         if let Some(store_id) = self.post_id_for(post.object_id, &post.path) {
             let previous = self
                 .posts
@@ -242,7 +270,8 @@ pub fn register_object_path(
     let existing = get_by_object_id(&object_id).or_else(|| get_by_path(&path));
     let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(path.clone(), last_updated));
     post.object_id = Some(object_id);
-    post.path = path;
+    post.path = path.clone();
+    post.section = section_from_path(&path);
     if last_updated > post.last_updated {
         post.last_updated = last_updated;
     }
@@ -277,7 +306,8 @@ pub fn set_publication_date(path: &Path, date: DateTime<FixedOffset>) {
 pub fn transfer_post_to_path(from: &Path, to: PathBuf, object_id: ObjectId, last_updated: DateTime<FixedOffset>) {
     let existing = get_by_path(from).or_else(|| get_by_object_id(&object_id));
     let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(to.clone(), last_updated));
-    post.path = to;
+    post.path = to.clone();
+    post.section = section_from_path(&to);
     post.object_id = Some(object_id);
     if last_updated > post.last_updated {
         post.last_updated = last_updated;
@@ -338,5 +368,18 @@ mod tests {
     fn is_draft_md_matches_pattern() {
         assert!(is_draft_md(Path::new("a.draft.md")));
         assert!(!is_draft_md(Path::new("a.md")));
+    }
+
+    #[test]
+    fn section_from_path_uses_top_level_folder() {
+        assert_eq!(
+            section_from_path(Path::new("tech/hello.md")),
+            Some("tech".to_string())
+        );
+        assert_eq!(
+            section_from_path(Path::new("tech/sub/hello.md")),
+            Some("tech".to_string())
+        );
+        assert_eq!(section_from_path(Path::new("hello.md")), None);
     }
 }

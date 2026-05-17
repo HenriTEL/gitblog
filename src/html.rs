@@ -5,7 +5,7 @@ use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
 use serde::Serialize;
 use tera::{Context, Tera};
 
-use crate::blog_post::{self, BlogPost as DomainBlogPost, fallback_title};
+use crate::blog_post::{self, collect_sections, BlogPost as DomainBlogPost, fallback_title};
 use crate::markdown::{
     article_description_html_fragment, article_render_parts, markdown_fragment_to_plain_text,
     render_markdown_to_html,
@@ -98,11 +98,10 @@ pub fn render_index_html(
     )
 }
 
-pub fn write_index_from_blog_posts(
-    dest: &Path,
+fn render_blog_posts_for_index(
     user_profile: &UserProfileMeta,
     posts: &[DomainBlogPost],
-) {
+) -> Vec<RenderBlogPost> {
     let mut rendered_posts = posts
         .iter()
         .map(|post| {
@@ -131,18 +130,52 @@ pub fn write_index_from_blog_posts(
         })
         .collect::<Vec<_>>();
     rendered_posts.sort_by(|a, b| b.creation_dt.cmp(&a.creation_dt));
+    rendered_posts
+}
 
+fn write_index_at(
+    dest: &Path,
+    user_profile: &UserProfileMeta,
+    posts: &[DomainBlogPost],
+    sections: &[String],
+    page_title: &str,
+) {
+    std::fs::create_dir_all(dest).expect("create index directory");
+    let rendered_posts = render_blog_posts_for_index(user_profile, posts);
     let html = render_index_html(
         templates::tera(),
-        "Home".to_string(),
+        page_title.to_string(),
         user_profile.username.clone(),
         rendered_posts,
-        Vec::new(),
+        sections.to_vec(),
         None,
         HashMap::new(),
     )
     .expect("render index");
     std::fs::write(dest.join("index.html"), html).expect("write index");
+}
+
+pub fn write_index_from_blog_posts(
+    dest: &Path,
+    user_profile: &UserProfileMeta,
+    posts: &[DomainBlogPost],
+) {
+    let sections = collect_sections(posts);
+    write_index_at(dest, user_profile, posts, &sections, "Home");
+    for section in &sections {
+        let filtered: Vec<_> = posts
+            .iter()
+            .filter(|p| p.section.as_deref() == Some(section.as_str()))
+            .cloned()
+            .collect();
+        write_index_at(
+            &dest.join(section),
+            user_profile,
+            &filtered,
+            &sections,
+            section,
+        );
+    }
 }
 
 /// Converts a Markdown file to a full HTML page using the embedded article template.
@@ -188,10 +221,12 @@ pub fn markdown_file_to_html(
 
     let main_content = render_markdown_to_html(&parts.body_markdown, frontmatter_delimiter);
 
+    let sections = collect_sections(&blog_post::all());
+
     let ctx = ArticlePageContext {
         blog_post,
         main_content,
-        sections: Vec::new(),
+        sections,
         avatar_url: None,
         social_accounts: HashMap::new(),
     };
