@@ -113,7 +113,10 @@ pub fn markdown_to_gemtext(markdown: &str) -> String {
 
 pub fn write_index_gemtext(dest: &Path, blog_posts: &[BlogPost]) -> std::io::Result<()> {
     let mut posts = blog_posts.to_vec();
-    posts.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+    posts.sort_by(|a, b| {
+        b.effective_publication_date()
+            .cmp(&a.effective_publication_date())
+    });
 
     let mut gemtext = String::from("# Blog\n\n");
     for post in posts {
@@ -122,7 +125,7 @@ pub fn write_index_gemtext(dest: &Path, blog_posts: &[BlogPost]) -> std::io::Res
             .with_extension("gmi")
             .to_string_lossy()
             .to_string();
-        let date = post.last_updated.format("%Y-%m-%d");
+        let date = post.effective_publication_date().format("%Y-%m-%d");
         gemtext.push_str(&format!("=> /{relative_path} {} ({date})\n", post.title));
     }
 

@@ -33,6 +33,7 @@ fn test_parse_example_feed() {
     );
     assert_eq!(first.link.rel, "alternate");
     assert!(!first.summary.is_empty());
+    assert_eq!(first.effective_published(), first.updated);
 
     let android = feed
         .entries

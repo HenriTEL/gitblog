@@ -12,7 +12,7 @@ pub struct Author {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Link {
     #[serde(rename = "@href")]
     pub href: String,
@@ -20,14 +20,22 @@ pub struct Link {
     pub rel: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Entry {
     pub id: String,
     pub title: String,
     pub updated: DateTime<FixedOffset>,
+    #[serde(default)]
+    pub published: Option<DateTime<FixedOffset>>,
     pub link: Link,
     #[serde(default)]
     pub summary: String,
+}
+
+impl Entry {
+    pub fn effective_published(&self) -> DateTime<FixedOffset> {
+        self.published.unwrap_or(self.updated)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,8 +65,8 @@ pub fn build_feed_from_blog_posts(
     let base_url = blog_url.trim_end_matches('/');
     let mut sorted_posts = posts.to_vec();
     sorted_posts.sort_by(|a, b| {
-        b.last_updated
-            .cmp(&a.last_updated)
+        b.effective_publication_date()
+            .cmp(&a.effective_publication_date())
             .then_with(|| a.path.cmp(&b.path))
     });
 
@@ -71,10 +79,12 @@ pub fn build_feed_from_blog_posts(
                 .to_string_lossy()
                 .to_string();
             let href = format!("{base_url}/{rel_html}");
+            let published = post.effective_publication_date();
             Entry {
                 id: href.clone(),
                 title: post.title.clone(),
                 updated: post.last_updated,
+                published: Some(published),
                 link: Link {
                     href,
                     rel: "alternate".to_string(),
@@ -149,6 +159,11 @@ pub fn generate(feed: &Feed) -> Result<String, quick_xml::Error> {
 
         write_text_elem(&mut writer, "id", &entry.id)?;
         write_text_elem(&mut writer, "title", &entry.title)?;
+        write_text_elem(
+            &mut writer,
+            "published",
+            &rfc3339_seconds(entry.effective_published()),
+        )?;
         write_text_elem(&mut writer, "updated", &rfc3339_seconds(entry.updated))?;
 
         let mut link_el = BytesStart::new("link");

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
@@ -117,6 +118,174 @@ pub fn update_blog_post_from_markdown_path(
 
 pub fn all_blog_posts() -> Vec<BlogPost> {
     blog_post::all()
+}
+
+/// Apply one commit's tree diff to the blog post store (newest-first walk).
+pub fn apply_tree_diff_to_blog_posts(
+    diff: &HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
+    commit_dt: DateTime<FixedOffset>,
+) {
+    let mut deleted = Vec::new();
+    let mut created = Vec::new();
+    let mut modified = Vec::new();
+
+    for (path, (state, maybe_oid)) in diff {
+        match (state, maybe_oid) {
+            (State::Deleted, _) => deleted.push(path.clone()),
+            (State::Created, Some(oid)) => created.push((path.clone(), *oid)),
+            (State::Modified, Some(oid)) => modified.push((path.clone(), *oid)),
+            _ => {}
+        }
+    }
+
+    let mut handled_deleted: HashSet<PathBuf> = HashSet::new();
+    let mut handled_created: HashSet<PathBuf> = HashSet::new();
+
+    for draft_path in &deleted {
+        if !blog_post::is_draft_md(draft_path) {
+            continue;
+        }
+        let Some(published) = blog_post::published_path_from_draft(draft_path) else {
+            continue;
+        };
+        let Some((created_path, oid)) = created
+            .iter()
+            .find(|(p, _)| p == &published)
+            .map(|(p, o)| (p.clone(), *o))
+        else {
+            continue;
+        };
+        blog_post::transfer_post_to_path(draft_path, created_path.clone(), oid, commit_dt);
+        blog_post::set_publication_date(&created_path, commit_dt);
+        handled_deleted.insert(draft_path.clone());
+        handled_created.insert(created_path);
+    }
+
+    for del_path in &deleted {
+        if handled_deleted.contains(del_path) {
+            continue;
+        }
+        if blog_post::get_by_path(del_path).is_none() {
+            continue;
+        }
+        if let Some((created_path, oid)) = created.iter().find_map(|(path, oid)| {
+            if handled_created.contains(path) {
+                return None;
+            }
+            let post = blog_post::get_by_path(del_path)?;
+            (post.object_id == Some(*oid)).then(|| (path.clone(), *oid))
+        }) {
+            blog_post::transfer_post_to_path(del_path, created_path.clone(), oid, commit_dt);
+            handled_deleted.insert(del_path.clone());
+            handled_created.insert(created_path);
+        }
+    }
+
+    let remaining_deleted: Vec<_> = deleted
+        .iter()
+        .filter(|p| !handled_deleted.contains(*p) && blog_post::get_by_path(p).is_some())
+        .collect();
+    let remaining_created: Vec<_> = created
+        .iter()
+        .filter(|(p, _)| !handled_created.contains(p))
+        .collect();
+    if remaining_deleted.len() == 1 && remaining_created.len() == 1 {
+        let del_path = remaining_deleted[0];
+        let (created_path, oid) = remaining_created[0];
+        blog_post::transfer_post_to_path(del_path, created_path.clone(), *oid, commit_dt);
+        handled_deleted.insert(del_path.clone());
+        handled_created.insert(created_path.clone());
+    }
+
+    for (path, oid) in &created {
+        if handled_created.contains(path) || crate::path_is_ignored(path, false) {
+            continue;
+        }
+        if let Some(existing) = blog_post::get_by_object_id(oid) {
+            if existing.path != *path {
+                blog_post::try_set_publication_date(&existing.path, commit_dt);
+                if commit_dt > existing.last_updated {
+                    let _ = blog_post::update_by_object_id(
+                        oid,
+                        BlogPostUpdate {
+                            last_updated: Some(commit_dt),
+                            ..BlogPostUpdate::default()
+                        },
+                    );
+                }
+                continue;
+            }
+        }
+        blog_post::register_object_path(*oid, path.clone(), commit_dt);
+        blog_post::try_set_publication_date(path, commit_dt);
+        let _ = blog_post::update_by_object_id(
+            oid,
+            BlogPostUpdate {
+                path: Some(path.clone()),
+                last_updated: Some(commit_dt),
+                ..BlogPostUpdate::default()
+            },
+        );
+    }
+
+    for (path, oid) in &modified {
+        if crate::path_is_ignored(path, false) {
+            continue;
+        }
+        blog_post::register_object_path(*oid, path.clone(), commit_dt);
+        let _ = blog_post::update_by_object_id(
+            oid,
+            BlogPostUpdate {
+                path: Some(path.clone()),
+                last_updated: Some(commit_dt),
+                ..BlogPostUpdate::default()
+            },
+        );
+    }
+}
+
+fn walk_commits_newest_first(
+    repo: &gix::Repository,
+    head_id: gix::ObjectId,
+    up_to: Option<&DateTime<FixedOffset>>,
+) -> Vec<(gix::ObjectId, DateTime<FixedOffset>)> {
+    let walk = repo
+        .rev_walk([head_id])
+        .sorting(Sorting::ByCommitTime(Default::default()))
+        .all()
+        .expect("rev_walk iterator");
+
+    let mut commit_infos = Vec::new();
+    for info in walk {
+        let info = info.expect("rev walk item");
+        let commit = info.object().expect("load commit");
+        let dt = commit_time_from_commit(&commit);
+        let tree_id = commit.tree_id().expect("commit tree").detach();
+        commit_infos.push((tree_id, dt));
+        if up_to.is_some_and(|cutoff| dt <= *cutoff) {
+            break;
+        }
+    }
+    commit_infos
+}
+
+fn apply_commit_history_to_blog_posts(
+    repo: &gix::Repository,
+    commit_infos: &[(gix::ObjectId, DateTime<FixedOffset>)],
+    tree_diff_fn: impl Fn(&Tree, &Tree) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
+) {
+    for i in 0..commit_infos.len() {
+        let (tree_oid, commit_dt) = &commit_infos[i];
+        let current_tree = load_tree(repo, *tree_oid).expect("load tree");
+        let parent_tree = if i + 1 < commit_infos.len() {
+            Some(load_tree(repo, commit_infos[i + 1].0).expect("load parent tree"))
+        } else {
+            None
+        };
+        let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
+        let diff = tree_diff_fn(&from, &current_tree);
+        apply_tree_diff_to_blog_posts(&diff, *commit_dt);
+    }
 }
 
 fn branch_commit_id(
@@ -681,19 +850,7 @@ impl GitRemote {
             };
             let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
             let diff = self.tree_diff(&from, &current_tree);
-            for (path, (state, maybe_oid)) in &diff {
-                if let (State::Created | State::Modified, Some(oid)) = (state, maybe_oid) {
-                    blog_post::register_object_path(*oid, path.clone(), *commit_dt);
-                    let _ = blog_post::update_by_object_id(
-                        oid,
-                        BlogPostUpdate {
-                            path: Some(path.clone()),
-                            last_updated: Some(*commit_dt),
-                            ..BlogPostUpdate::default()
-                        },
-                    );
-                }
-            }
+            apply_tree_diff_to_blog_posts(&diff, *commit_dt);
         }
 
         TreeEnds {
@@ -761,55 +918,23 @@ impl GitLocal {
         Ok(dest)
     }
 
+    /// Walk the full branch history and set publication dates from git events.
+    pub fn index_publication_dates(&self) {
+        let repo = self.open().expect("discover local repo");
+        let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
+        let commit_infos = walk_commits_newest_first(&repo, head_id, None);
+        println!("Indexed publication dates from {} commits", commit_infos.len());
+        apply_commit_history_to_blog_posts(&repo, &commit_infos, tree_diff);
+    }
+
     pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
         let repo = self.open().expect("discover local repo");
         let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
-
-        let walk = repo
-            .rev_walk([head_id])
-            .sorting(Sorting::ByCommitTime(Default::default()))
-            .all()
-            .expect("rev_walk iterator");
-
-        let mut commit_infos: Vec<(gix::ObjectId, DateTime<FixedOffset>)> = Vec::new();
-
-        for info in walk {
-            let info = info.expect("rev walk item");
-            let commit = info.object().expect("load commit");
-            let dt = commit_time_from_commit(&commit);
-            let tree_id = commit.tree_id().expect("commit tree").detach();
-            commit_infos.push((tree_id, dt));
-            if dt <= *up_to {
-                break;
-            }
-        }
+        let commit_infos = walk_commits_newest_first(&repo, head_id, Some(up_to));
 
         println!("Fetched {} commits", commit_infos.len());
 
-        for i in 0..commit_infos.len() {
-            let (tree_oid, commit_dt) = &commit_infos[i];
-            let current_tree = load_tree(&repo, *tree_oid).expect("load tree");
-            let parent_tree = if i + 1 < commit_infos.len() {
-                Some(load_tree(&repo, commit_infos[i + 1].0).expect("load parent tree"))
-            } else {
-                None
-            };
-            let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
-            let diff = tree_diff(&from, &current_tree);
-            for (path, (state, maybe_oid)) in &diff {
-                if let (State::Created | State::Modified, Some(oid)) = (state, maybe_oid) {
-                    blog_post::register_object_path(*oid, path.clone(), *commit_dt);
-                    let _ = blog_post::update_by_object_id(
-                        oid,
-                        BlogPostUpdate {
-                            path: Some(path.clone()),
-                            last_updated: Some(*commit_dt),
-                            ..BlogPostUpdate::default()
-                        },
-                    );
-                }
-            }
-        }
+        apply_commit_history_to_blog_posts(&repo, &commit_infos, tree_diff);
 
         let head_tree = commit_infos
             .first()
@@ -955,14 +1080,140 @@ pub fn tree_diff(from: &Tree, to: &Tree) -> HashMap<PathBuf, (State, Option<gix:
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
-    use super::worktree_copy_is_skipped;
+    use chrono::{TimeZone, Utc};
+    use gix::objs::Kind;
+
+    use super::{apply_tree_diff_to_blog_posts, worktree_copy_is_skipped, State};
+    use crate::blog_post;
 
     #[test]
     fn worktree_copy_skips_dot_git() {
         assert!(worktree_copy_is_skipped(Path::new(".git"), true));
         assert!(worktree_copy_is_skipped(Path::new(".git/config"), false));
         assert!(!worktree_copy_is_skipped(Path::new("posts/post.md"), false));
+    }
+
+    #[test]
+    fn apply_diff_sets_publication_on_first_create() {
+        let path = PathBuf::from("posts/gitblog-test-create.md");
+        let content = b"# Hello\n";
+        let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, Kind::Blob, content);
+        let commit_dt = Utc
+            .with_ymd_and_hms(2024, 6, 1, 10, 0, 0)
+            .unwrap()
+            .fixed_offset();
+        let mut diff = HashMap::new();
+        diff.insert(path.clone(), (State::Created, Some(oid)));
+
+        apply_tree_diff_to_blog_posts(&diff, commit_dt);
+
+        let post = blog_post::get_by_path(&path).expect("post registered");
+        assert_eq!(post.publication_date, Some(commit_dt));
+    }
+
+    #[test]
+    fn apply_diff_draft_publish_sets_publication_to_commit() {
+        let draft = PathBuf::from("posts/gitblog-test.draft.md");
+        let published = PathBuf::from("posts/gitblog-test.md");
+        let content = b"# Draft\n";
+        let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, Kind::Blob, content);
+        let draft_dt = Utc
+            .with_ymd_and_hms(2024, 1, 1, 10, 0, 0)
+            .unwrap()
+            .fixed_offset();
+        let publish_dt = Utc
+            .with_ymd_and_hms(2024, 2, 1, 10, 0, 0)
+            .unwrap()
+            .fixed_offset();
+
+        let mut create_draft = HashMap::new();
+        create_draft.insert(draft.clone(), (State::Created, Some(oid)));
+        apply_tree_diff_to_blog_posts(&create_draft, draft_dt);
+
+        let mut publish = HashMap::new();
+        publish.insert(draft.clone(), (State::Deleted, None));
+        publish.insert(published.clone(), (State::Created, Some(oid)));
+        apply_tree_diff_to_blog_posts(&publish, publish_dt);
+
+        let post = blog_post::get_by_path(&published).expect("published post");
+        assert_eq!(post.publication_date, Some(publish_dt));
+    }
+
+    #[test]
+    fn git_repo_preserves_publication_across_rename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .status()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .status()
+            .expect("git config name");
+
+        let old_path = repo.join("article.md");
+        std::fs::write(&old_path, "# Post\n").expect("write");
+        Command::new("git")
+            .args(["add", "article.md"])
+            .current_dir(repo)
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "create",
+                "--date",
+                "2024-01-01T10:00:00+00:00",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("git commit create");
+
+        let local = super::GitLocal {
+            repo_root: repo.to_path_buf(),
+            branch: "main".to_string(),
+        };
+        local.index_publication_dates();
+        let created = blog_post::get_by_path(Path::new("article.md")).expect("created");
+        let original_publication = created.effective_publication_date();
+
+        std::fs::rename(repo.join("article.md"), repo.join("renamed.md")).expect("rename");
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo)
+            .status()
+            .expect("git add rename");
+        Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "rename",
+                "--date",
+                "2024-06-01T10:00:00+00:00",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("git commit rename");
+
+        local.index_publication_dates();
+        let renamed = blog_post::get_by_path(Path::new("renamed.md")).expect("renamed");
+        assert_eq!(
+            renamed.effective_publication_date(),
+            original_publication,
+            "publication date should survive a path rename"
+        );
     }
 }

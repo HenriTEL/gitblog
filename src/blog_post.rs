@@ -11,6 +11,8 @@ use crate::markdown::parse_content_metadata;
 pub struct BlogPost {
     pub object_id: Option<ObjectId>,
     pub last_updated: DateTime<FixedOffset>,
+    /// `None` until set from Atom or git; use [`BlogPost::effective_publication_date`].
+    pub publication_date: Option<DateTime<FixedOffset>>,
     pub title: String,
     pub summary: String,
     pub path: PathBuf,
@@ -20,6 +22,7 @@ pub struct BlogPost {
 pub struct BlogPostUpdate {
     pub object_id: Option<ObjectId>,
     pub last_updated: Option<DateTime<FixedOffset>>,
+    pub publication_date: Option<DateTime<FixedOffset>>,
     pub title: Option<String>,
     pub summary: Option<String>,
     pub path: Option<PathBuf>,
@@ -47,6 +50,7 @@ impl BlogPost {
         Self {
             object_id: None,
             last_updated,
+            publication_date: None,
             title,
             summary,
             path,
@@ -60,7 +64,12 @@ impl BlogPost {
             summary: String::new(),
             path,
             last_updated,
+            publication_date: None,
         }
+    }
+
+    pub fn effective_publication_date(&self) -> DateTime<FixedOffset> {
+        self.publication_date.unwrap_or(self.last_updated)
     }
 
     pub fn update_from_source(
@@ -81,6 +90,7 @@ impl BlogPost {
         title: String,
         summary: String,
         last_updated: DateTime<FixedOffset>,
+        publication_date: DateTime<FixedOffset>,
     ) -> Self {
         Self {
             object_id: None,
@@ -88,16 +98,20 @@ impl BlogPost {
             title,
             summary,
             last_updated,
+            publication_date: Some(publication_date),
         }
     }
 
     pub fn update_from_source_content(&mut self, content: &str, frontmatter_delimiter: &str) {
         let fallback = fallback_title(&self.path);
-        let (title, summary, date) =
+        let (title, summary, publication_date, last_modified) =
             parse_content_metadata(content, &fallback, frontmatter_delimiter);
         self.title = title;
         self.summary = summary;
-        if let Some(date) = date {
+        if let Some(date) = publication_date {
+            self.publication_date = Some(date);
+        }
+        if let Some(date) = last_modified {
             self.last_updated = date;
         }
     }
@@ -109,6 +123,9 @@ impl BlogPost {
         if let Some(last_updated) = update.last_updated {
             self.last_updated = last_updated;
         }
+        if let Some(publication_date) = update.publication_date {
+            self.publication_date = Some(publication_date);
+        }
         if let Some(title) = update.title {
             self.title = title;
         }
@@ -119,6 +136,19 @@ impl BlogPost {
             self.path = path;
         }
     }
+}
+
+pub fn is_draft_md(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".draft.md"))
+}
+
+/// `post.draft.md` → `post.md`
+pub fn published_path_from_draft(draft: &Path) -> Option<PathBuf> {
+    let name = draft.file_name()?.to_str()?;
+    let published = name.strip_suffix(".draft.md")?;
+    Some(draft.with_file_name(format!("{published}.md")))
 }
 
 pub fn fallback_title(path: &Path) -> String {
@@ -161,6 +191,9 @@ impl BlogPostStore {
             let mut merged = post;
             if merged.object_id.is_none() {
                 merged.object_id = previous.object_id;
+            }
+            if merged.publication_date.is_none() {
+                merged.publication_date = previous.publication_date;
             }
             self.posts.insert(store_id, merged.clone());
             self.reindex(store_id, &previous, &merged);
@@ -216,6 +249,42 @@ pub fn register_object_path(
     upsert(post)
 }
 
+pub fn try_set_publication_date(path: &Path, date: DateTime<FixedOffset>) {
+    let Some(post) = get_by_path(path) else {
+        return;
+    };
+    if post.publication_date.is_none() {
+        let _ = update_by_path(
+            path,
+            BlogPostUpdate {
+                publication_date: Some(date),
+                ..BlogPostUpdate::default()
+            },
+        );
+    }
+}
+
+pub fn set_publication_date(path: &Path, date: DateTime<FixedOffset>) {
+    let _ = update_by_path(
+        path,
+        BlogPostUpdate {
+            publication_date: Some(date),
+            ..BlogPostUpdate::default()
+        },
+    );
+}
+
+pub fn transfer_post_to_path(from: &Path, to: PathBuf, object_id: ObjectId, last_updated: DateTime<FixedOffset>) {
+    let existing = get_by_path(from).or_else(|| get_by_object_id(&object_id));
+    let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(to.clone(), last_updated));
+    post.path = to;
+    post.object_id = Some(object_id);
+    if last_updated > post.last_updated {
+        post.last_updated = last_updated;
+    }
+    upsert(post);
+}
+
 pub fn get_by_object_id(object_id: &ObjectId) -> Option<BlogPost> {
     BLOG_POST_STORE.with(|store| {
         let store = store.borrow();
@@ -250,4 +319,24 @@ pub fn update_by_path(path: &Path, update: BlogPostUpdate) -> Option<BlogPost> {
 
 pub fn all() -> Vec<BlogPost> {
     BLOG_POST_STORE.with(|store| store.borrow().posts.values().cloned().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_path_from_draft_strips_suffix() {
+        let draft = PathBuf::from("notes/post.draft.md");
+        assert_eq!(
+            published_path_from_draft(&draft),
+            Some(PathBuf::from("notes/post.md"))
+        );
+    }
+
+    #[test]
+    fn is_draft_md_matches_pattern() {
+        assert!(is_draft_md(Path::new("a.draft.md")));
+        assert!(!is_draft_md(Path::new("a.md")));
+    }
 }

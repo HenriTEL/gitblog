@@ -384,6 +384,14 @@ fn main() -> ExitCode {
                 (dest, updated_file_blobs)
             };
 
+            if up_to == MIN_UTC.fixed_offset() {
+                let local = GitLocal {
+                    repo_root: repo_root.clone(),
+                    branch: args.branch.clone(),
+                };
+                local.index_publication_dates();
+            }
+
             let user_profile = update_profile_for_local_repo(&repo, &args.branch, &dest, args.full)
                 .expect("update profile");
             finish_build(
@@ -506,7 +514,7 @@ fn finish_build(
             &args.frontmatter_delimiter,
         );
     }
-    let posts = git::all_blog_posts();
+    let posts = publishable_blog_posts(git::all_blog_posts());
     render_markdown_files(
         user_profile,
         dest,
@@ -572,7 +580,7 @@ fn render_markdown_files(
     with_gemini: bool,
 ) {
     walk_markdown_files(dest, &mut |abs, rel| {
-        markdown_file_to_html(user_profile, abs, frontmatter_delimiter);
+        markdown_file_to_html(user_profile, abs, rel, frontmatter_delimiter);
         println!("wrote {} ", rel.with_extension("html").to_string_lossy());
         if with_gemini {
             markdown_file_to_gemtext(abs, frontmatter_delimiter).expect("write gemtext");
@@ -954,6 +962,13 @@ fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
     Ok(feed)
 }
 
+fn publishable_blog_posts(posts: Vec<BlogPost>) -> Vec<BlogPost> {
+    posts
+        .into_iter()
+        .filter(|p| !gitblog::path_is_ignored(&p.path, false))
+        .collect()
+}
+
 fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
     for entry in &feed.entries {
         let path = source_path_from_entry_url(blog_url, &entry.link.href);
@@ -962,6 +977,7 @@ fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
             entry.title.clone(),
             entry.summary.clone(),
             entry.updated,
+            entry.effective_published(),
         );
         git::update_blog_post_from_atom(path, post);
     }

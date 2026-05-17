@@ -13,7 +13,7 @@ pub mod static_content;
 pub(crate) mod templates;
 pub mod user_profile;
 
-pub const IGNORE_FILES: &[&str] = &["draft/", "LICENSE.md"];
+pub const IGNORE_FILES: &[&str] = &["*.draft.md", "LICENSE.md"];
 
 pub fn path_is_ignored(relative_path: &Path, is_dir: bool) -> bool {
     let mut builder = GitignoreBuilder::new("/");

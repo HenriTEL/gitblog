@@ -16,20 +16,21 @@ fn parse_ts(s: &str) -> DateTime<FixedOffset> {
 
 #[test]
 fn builds_atom_feed_from_blog_posts() {
-    let posts = vec![
-        BlogPost::new(
-            PathBuf::from("notes/first.md"),
-            parse_ts("2026-04-01T10:00:00+02:00"),
-            "First".to_string(),
-            "Summary one".to_string(),
-        ),
-        BlogPost::new(
-            PathBuf::from("notes/second.md"),
-            parse_ts("2026-04-02T10:00:00+02:00"),
-            "Second".to_string(),
-            String::new(),
-        ),
-    ];
+    let mut first = BlogPost::new(
+        PathBuf::from("notes/first.md"),
+        parse_ts("2026-04-01T10:00:00+02:00"),
+        "First".to_string(),
+        "Summary one".to_string(),
+    );
+    first.publication_date = Some(parse_ts("2026-04-01T10:00:00+02:00"));
+    let mut second = BlogPost::new(
+        PathBuf::from("notes/second.md"),
+        parse_ts("2026-04-02T10:00:00+02:00"),
+        "Second".to_string(),
+        String::new(),
+    );
+    second.publication_date = Some(parse_ts("2026-04-02T10:00:00+02:00"));
+    let posts = vec![first, second];
 
     let feed = build_feed_from_blog_posts("https://example.com/blog", &posts, None);
     assert_eq!(feed.entries.len(), 2);
@@ -41,6 +42,8 @@ fn builds_atom_feed_from_blog_posts() {
     assert_eq!(feed.entries[1].summary, "Summary one");
 
     let xml = generate(&feed).expect("atom xml generation");
+    assert!(xml.contains("<published>2026-04-02T10:00:00+02:00</published>"));
+    assert!(xml.contains("<published>2026-04-01T10:00:00+02:00</published>"));
     assert!(xml.contains("<updated>2026-04-02T10:00:00+02:00</updated>"));
     assert!(xml.contains("<updated>2026-04-01T10:00:00+02:00</updated>"));
     assert!(!xml.contains("T10:00:00.000"));
@@ -51,20 +54,21 @@ fn writes_index_from_blog_posts() {
     let dir = tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("media")).expect("media dir");
 
-    let posts = vec![
-        BlogPost::new(
-            PathBuf::from("notes/zeta.md"),
-            parse_ts("2026-04-01T10:00:00+02:00"),
-            "Zeta".to_string(),
-            "A summary".to_string(),
-        ),
-        BlogPost::new(
-            PathBuf::from("notes/alpha.md"),
-            parse_ts("2026-04-03T10:00:00+02:00"),
-            "Alpha".to_string(),
-            String::new(),
-        ),
-    ];
+    let mut zeta = BlogPost::new(
+        PathBuf::from("notes/zeta.md"),
+        parse_ts("2026-04-01T10:00:00+02:00"),
+        "Zeta".to_string(),
+        "A summary".to_string(),
+    );
+    zeta.publication_date = Some(parse_ts("2026-04-01T10:00:00+02:00"));
+    let mut alpha = BlogPost::new(
+        PathBuf::from("notes/alpha.md"),
+        parse_ts("2026-04-03T10:00:00+02:00"),
+        "Alpha".to_string(),
+        String::new(),
+    );
+    alpha.publication_date = Some(parse_ts("2026-04-03T10:00:00+02:00"));
+    let posts = vec![zeta, alpha];
 
     let profile = UserProfileMeta {
         username: "author".into(),

@@ -5,12 +5,18 @@ use comrak::{Options, markdown_to_html};
 pub struct Frontmatter {
     pub title: Option<String>,
     pub description: Option<String>,
+    /// Publication time (`date` in front matter).
     pub date: Option<DateTime<FixedOffset>>,
+    /// Last modified time (`lastmod` in front matter).
+    pub lastmod: Option<DateTime<FixedOffset>>,
 }
 
 impl Frontmatter {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.description.is_none() && self.date.is_none()
+        self.title.is_none()
+            && self.description.is_none()
+            && self.date.is_none()
+            && self.lastmod.is_none()
     }
 }
 
@@ -27,6 +33,7 @@ fn parse_frontmatter_fields(raw: &str) -> Frontmatter {
         title: None,
         description: None,
         date: None,
+        lastmod: None,
     };
 
     for line in raw.lines() {
@@ -43,6 +50,7 @@ fn parse_frontmatter_fields(raw: &str) -> Frontmatter {
             "title" => frontmatter.title = Some(value.to_string()),
             "description" => frontmatter.description = Some(value.to_string()),
             "date" => frontmatter.date = parse_frontmatter_date(value),
+            "lastmod" => frontmatter.lastmod = parse_frontmatter_date(value),
             _ => {}
         }
     }
@@ -143,12 +151,13 @@ enum BodySummaryKind {
     },
 }
 
-/// Title, summary markdown, optional date, and markdown for `<main>` (leading title / lede removed).
+/// Title, summary markdown, optional dates, and markdown for `<main>` (leading title / lede removed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArticleRenderParts {
     pub title: String,
     pub summary_markdown: String,
-    pub date: Option<DateTime<FixedOffset>>,
+    pub publication_date: Option<DateTime<FixedOffset>>,
+    pub last_modified: Option<DateTime<FixedOffset>>,
     pub body_markdown: String,
 }
 
@@ -314,7 +323,8 @@ pub fn article_render_parts(
     ArticleRenderParts {
         title,
         summary_markdown,
-        date: frontmatter.date,
+        publication_date: frontmatter.date,
+        last_modified: frontmatter.lastmod,
         body_markdown,
     }
 }
@@ -323,9 +333,19 @@ pub fn parse_content_metadata(
     markdown: &str,
     fallback_title: &str,
     frontmatter_delimiter: &str,
-) -> (String, String, Option<DateTime<FixedOffset>>) {
+) -> (
+    String,
+    String,
+    Option<DateTime<FixedOffset>>,
+    Option<DateTime<FixedOffset>>,
+) {
     let parts = article_render_parts(markdown, fallback_title, frontmatter_delimiter);
-    (parts.title, parts.summary_markdown, parts.date)
+    (
+        parts.title,
+        parts.summary_markdown,
+        parts.publication_date,
+        parts.last_modified,
+    )
 }
 
 /// Renders a short markdown fragment (no front matter) to HTML.
@@ -445,9 +465,10 @@ date: 2026-04-24
 
 > Body summary
 "#;
-        let (title, summary, date) = parse_content_metadata(md, "fallback", "---");
+        let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
         assert_eq!(title, "Frontmatter Title");
         assert_eq!(summary, "Frontmatter Description");
+        assert!(lastmod.is_none());
         let date = date.expect("date should be parsed");
         assert_eq!(date.year(), 2026);
         assert_eq!(date.month(), 4);
@@ -463,13 +484,32 @@ date: 2026-04-24T10:15:30+02:00
 ---
 Body
 "#;
-        let (_title, _summary, date) = parse_content_metadata(md, "fallback", "---");
+        let (_title, _summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
         let date = date.expect("date should be parsed");
+        assert!(lastmod.is_none());
         assert_eq!(date.year(), 2026);
         assert_eq!(date.month(), 4);
         assert_eq!(date.day(), 24);
         assert_eq!(date.hour(), 10);
         assert_eq!(date.minute(), 15);
+    }
+
+    #[test]
+    fn frontmatter_lastmod_parses_independently_of_date() {
+        let md = r#"---
+date: 2026-01-01
+lastmod: 2026-06-15T12:00:00+02:00
+---
+Body
+"#;
+        let (_title, _summary, published, lastmod) = parse_content_metadata(md, "fallback", "---");
+        let published = published.expect("date");
+        let lastmod = lastmod.expect("lastmod");
+        assert_eq!(published.day(), 1);
+        assert_eq!(published.month(), 1);
+        assert_eq!(lastmod.day(), 15);
+        assert_eq!(lastmod.month(), 6);
+        assert_eq!(lastmod.hour(), 12);
     }
 
     #[test]
@@ -481,10 +521,11 @@ author: me
 
 > Body summary
 "#;
-        let (title, summary, date) = parse_content_metadata(md, "fallback", "---");
+        let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
         assert_eq!(title, "Body Title");
         assert_eq!(summary, "Body summary");
         assert!(date.is_none());
+        assert!(lastmod.is_none());
     }
 
     #[test]
@@ -497,10 +538,11 @@ description: Uses custom delimiter
 
 > Body summary
 "#;
-        let (title, summary, date) = parse_content_metadata(md, "fallback", "+++");
+        let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "+++");
         assert_eq!(title, "Custom");
         assert_eq!(summary, "Uses custom delimiter");
         assert!(date.is_none());
+        assert!(lastmod.is_none());
     }
 
     #[test]
