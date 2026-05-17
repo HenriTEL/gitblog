@@ -923,7 +923,10 @@ impl GitLocal {
         let repo = self.open().expect("discover local repo");
         let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
         let commit_infos = walk_commits_newest_first(&repo, head_id, None);
-        println!("Indexed publication dates from {} commits", commit_infos.len());
+        println!(
+            "Indexed publication dates from {} commits",
+            commit_infos.len()
+        );
         apply_commit_history_to_blog_posts(&repo, &commit_infos, tree_diff);
     }
 
@@ -1087,7 +1090,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use gix::objs::Kind;
 
-    use super::{apply_tree_diff_to_blog_posts, worktree_copy_is_skipped, State};
+    use super::{State, apply_tree_diff_to_blog_posts, worktree_copy_is_skipped};
     use crate::blog_post;
 
     #[test]

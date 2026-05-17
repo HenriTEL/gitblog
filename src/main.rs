@@ -1,7 +1,6 @@
 use std::{
     error::Error,
-    fmt,
-    fs,
+    fmt, fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::ExitCode,

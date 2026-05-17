@@ -303,7 +303,12 @@ pub fn set_publication_date(path: &Path, date: DateTime<FixedOffset>) {
     );
 }
 
-pub fn transfer_post_to_path(from: &Path, to: PathBuf, object_id: ObjectId, last_updated: DateTime<FixedOffset>) {
+pub fn transfer_post_to_path(
+    from: &Path,
+    to: PathBuf,
+    object_id: ObjectId,
+    last_updated: DateTime<FixedOffset>,
+) {
     let existing = get_by_path(from).or_else(|| get_by_object_id(&object_id));
     let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(to.clone(), last_updated));
     post.path = to.clone();

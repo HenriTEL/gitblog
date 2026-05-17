@@ -19,7 +19,8 @@
       {{ blog_post.description }}
       </p>
       <small>
-        Last updated on {{ blog_post.human_time }}
+        {# Date formatting reference: https://docs.rs/chrono/0.4.44/chrono/format/strftime/ #}
+        Last updated on {{ blog_post.last_update_dt| date(format="%B %d, %Y") }}
       </small>
     </article>
     {%- endfor %}

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::Serialize;
 use tera::{Context, Tera};
 
-use crate::blog_post::{self, collect_sections, BlogPost as DomainBlogPost, fallback_title};
+use crate::blog_post::{self, BlogPost as DomainBlogPost, collect_sections, fallback_title};
 use crate::markdown::{
     article_description_html_fragment, article_render_parts, markdown_fragment_to_plain_text,
     render_markdown_to_html,
@@ -22,11 +22,8 @@ pub struct RenderBlogPost {
     pub description: Option<String>,
     /// Rendered HTML for the article header lede (may contain inline markup).
     pub description_html: Option<String>,
-    pub creation_dt: DateTime<FixedOffset>,
+    pub publication_dt: DateTime<FixedOffset>,
     pub last_update_dt: DateTime<FixedOffset>,
-    pub creation_dt_rfc3339: String,
-    pub last_update_dt_rfc3339: String,
-    pub human_time: String,
     /// Site-relative URL path (e.g. `notes/foo.html`).
     pub relative_path: String,
 }
@@ -36,7 +33,7 @@ struct ArticlePageContext {
     blog_post: RenderBlogPost,
     main_content: String,
     sections: Vec<String>,
-    avatar_url: Option<String>,
+    author_name: String,
     social_accounts: HashMap<String, String>,
 }
 
@@ -48,15 +45,6 @@ struct IndexPageContext {
     sections: Vec<String>,
     avatar_url: Option<String>,
     social_accounts: HashMap<String, String>,
-}
-
-fn human_time(dt: DateTime<FixedOffset>) -> String {
-    let local = dt.with_timezone(&Local);
-    local.format("%-d %B %Y").to_string()
-}
-
-fn format_rfc3339_seconds(dt: DateTime<FixedOffset>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::Secs, false)
 }
 
 fn resolve_article_dates(
@@ -116,11 +104,8 @@ fn render_blog_posts_for_index(
                     Some(markdown_fragment_to_plain_text(&post.summary))
                 },
                 description_html: None,
-                creation_dt: published,
+                publication_dt: published,
                 last_update_dt: updated,
-                creation_dt_rfc3339: format_rfc3339_seconds(published),
-                last_update_dt_rfc3339: format_rfc3339_seconds(updated),
-                human_time: human_time(updated),
                 relative_path: post
                     .path
                     .with_extension("html")
@@ -129,7 +114,7 @@ fn render_blog_posts_for_index(
             }
         })
         .collect::<Vec<_>>();
-    rendered_posts.sort_by(|a, b| b.creation_dt.cmp(&a.creation_dt));
+    rendered_posts.sort_by(|a, b| b.publication_dt.cmp(&a.publication_dt));
     rendered_posts
 }
 
@@ -211,11 +196,8 @@ pub fn markdown_file_to_html(
             Some(description_plain)
         },
         description_html: article_description_html_fragment(&parts.summary_markdown),
-        creation_dt: published,
+        publication_dt: published,
         last_update_dt: last_updated,
-        creation_dt_rfc3339: format_rfc3339_seconds(published),
-        last_update_dt_rfc3339: format_rfc3339_seconds(last_updated),
-        human_time: human_time(last_updated),
         relative_path,
     };
 
@@ -227,7 +209,7 @@ pub fn markdown_file_to_html(
         blog_post,
         main_content,
         sections,
-        avatar_url: None,
+        author_name: user_profile.username.clone(),
         social_accounts: HashMap::new(),
     };
 
@@ -312,12 +294,7 @@ mod tests {
             username: "tester".into(),
             bio: String::new(),
         };
-        markdown_file_to_html(
-            &profile,
-            f.path(),
-            Path::new("notes/from-store.md"),
-            "---",
-        );
+        markdown_file_to_html(&profile, f.path(), Path::new("notes/from-store.md"), "---");
         let html = std::fs::read_to_string(f.path().with_extension("html")).unwrap();
         assert!(html.contains("2020-01-02T10:00:00+00:00"));
         assert!(html.contains("2024-05-06T15:30:00+00:00"));
