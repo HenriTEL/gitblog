@@ -14,14 +14,8 @@
   <main>
     {%- for blog_post in blog_posts %}
     <article>
-      <strong><a href="/{{ blog_post.relative_path }}">{{ blog_post.title }}</a></strong>
-      <p>
-      {{ blog_post.description }}
-      </p>
-      <small>
-        {# Date formatting reference: https://docs.rs/chrono/0.4.44/chrono/format/strftime/ #}
-        Last updated on {{ blog_post.last_update_dt| date(format="%B %d, %Y") }}
-      </small>
+      <time datetime="{{ blog_post.publication_dt| date(format="%Y-%m-%dT%H:%M:%S%:z") }}">{{ blog_post.publication_dt | date(format="%B %d, %Y") }}</time>
+      <a href="/{{ blog_post.relative_path }}">{{ blog_post.title }}</a>
     </article>
     {%- endfor %}
   </main>

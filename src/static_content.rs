@@ -1,6 +1,7 @@
 use std::path::Path;
 
 const STYLE_SHEET: &str = concat!(
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/css/preflight.css")),
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/css/theme.css")),
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/css/layout.css")),
 );
