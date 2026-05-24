@@ -3,7 +3,7 @@
 
 <head>
   {% include "head_common.html.j2" %}
-  <link href="/atom.xml" type="application/atom+xml" rel="alternate" title="Sitewide atom feed">
+  <link href="/atom.xml" type="application/atom+xml" rel="alternate" title="Sitewide news feed">
 </head>
 
 <body>
@@ -14,7 +14,8 @@
   <main>
     {%- for blog_post in blog_posts %}
     <article>
-      <time datetime="{{ blog_post.publication_dt| date(format="%Y-%m-%dT%H:%M:%S%:z") }}">{{ blog_post.publication_dt | date(format="%B %d, %Y") }}</time>
+      {# Date formatting reference: https://docs.rs/chrono/0.4.44/chrono/format/strftime/ #}
+      <time datetime="{{ blog_post.publication_dt| date(format="%Y-%m-%dT%H:%M:%S%:z") }}">{{ blog_post.publication_dt | date(format="%b %d, %Y") }}</time>
       <a href="/{{ blog_post.relative_path }}">{{ blog_post.title }}</a>
     </article>
     {%- endfor %}

@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
-use comrak::{Options, markdown_to_html};
+use comrak::markdown_to_html;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
@@ -402,12 +402,20 @@ pub fn article_description_html_fragment(summary_markdown: &str) -> Option<Strin
 }
 
 pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> String {
-    let mut options = Options::default();
+    let mut options = comrak::Options::default();
     options.extension.footnotes = true;
     options.extension.strikethrough = true;
     options.extension.table = true;
     options.extension.tasklist = true;
+
+    options.extension.header_id_prefix = Some("".to_string());
+    options.extension.autolink = true;
+
+    options.extension.math_dollars = true;
+    options.extension.math_code = true;
+
     options.extension.alerts = true;
+
     options.extension.front_matter_delimiter = frontmatter_delimiter_option(frontmatter_delimiter);
 
     markdown_to_html(markdown, &options)

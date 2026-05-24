@@ -532,7 +532,6 @@ fn finish_build(
         write_index_gemtext(dest, &posts).expect("write gemini index");
         println!("wrote index.gmi");
     }
-    println!("Using destination: {:?}", dest.to_str());
     if up_to == MIN_UTC.fixed_offset() {
         write_static_content(dest);
     }

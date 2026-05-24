@@ -1,9 +1,8 @@
 <nav>
-  <ul>
-    <li><a href="/"><img class="icon" heigth="48" width="48" src="/media/avatar" alt="Blog's logo"></a></li>
-    <li>{{ author_name }}'s Blog</li>&nbsp;&nbsp;
-    {%- for section in sections %}
-    <li><a href="/{{ section }}"><strong>{{ section|title }}</strong></a></li>
-    {%- endfor %}
-  </ul>
+  <a href="/"><img class="icon" heigth="48" width="48" src="/media/avatar" alt="Blog's logo">
+    {{ author_name }}'s Blog
+  </a>
+  {%- for section in sections %}
+    <a href="/{{ section }}"><strong>{{ section|title }}</strong></a>
+  {%- endfor %}
 </nav>

@@ -1,24 +1,23 @@
 <footer>
-  <p>
   {%- if social_accounts %}
     {%- for website, url in social_accounts %}
     <a href="{{ url }}" title="{{ website }}">
-      <svg>
+      <svg width="1rem" height="1rem">
         <use xlink:href="/media/icons.svg#{{ website }}" />
       </svg>
-    </a>&nbsp;
+    </a>
     {%- endfor %}
     <br />
   {%- endif %}
-    <b title="Creative Commons Attribution 4.0 International license">
-      <svg>
+    © {{ now() | date(format="%Y") }} by <b>{{ author_name }}</b> under
+    <a href="https://creativecommons.org/licenses/by/4.0/">
+      CC BY 4.0
+      <svg width="1rem" height="1rem">
         <use xlink:href="/media/icons.svg#cc" />
       </svg>
-      <svg>
+      <svg width="1rem" height="1rem">
         <use xlink:href="/media/icons.svg#by" />
       </svg>
-      {{ author_name }}
-    </b>
+    </a>
     | made with <a href="https://github.com/HenriTEL/gitblog" title="Gitblog">Gitblog</a>
-  </p>
 </footer>
