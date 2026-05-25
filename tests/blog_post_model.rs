@@ -84,8 +84,8 @@ fn writes_index_from_blog_posts() {
     assert!(home.contains("Hello World"));
     assert!(home.contains("Tenant Hell"));
     assert!(home.contains("/atom.xml"));
-    assert!(home.contains(r#"href="/tech""#));
-    assert!(home.contains(r#"href="/rant""#));
+    assert!(home.contains(r#"href="/tech/index.html""#));
+    assert!(home.contains(r#"href="/rant/index.html""#));
 
     let tech_index =
         std::fs::read_to_string(dir.path().join("tech/index.html")).expect("read tech index");
