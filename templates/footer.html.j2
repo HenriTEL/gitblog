@@ -2,7 +2,7 @@
   {%- if social_accounts %}
     {%- for website, url in social_accounts %}
     <a href="{{ url }}" title="{{ website }}">
-      <svg width="1rem" height="1rem">
+      <svg width="1rem" height="1rem" fill="currentcolor">
         <use xlink:href="/media/icons.svg#{{ website }}" />
       </svg>
     </a>
@@ -12,12 +12,12 @@
     © {{ now() | date(format="%Y") }} by <b>{{ author_name }}</b> under
     <a href="https://creativecommons.org/licenses/by/4.0/">
       CC BY 4.0
-      <svg width="1rem" height="1rem">
-        <use xlink:href="/media/icons.svg#cc" />
-      </svg>
-      <svg width="1rem" height="1rem">
-        <use xlink:href="/media/icons.svg#by" />
-      </svg>
     </a>
+    <svg width="1rem" height="1rem">
+      <use xlink:href="/media/icons.svg#cc" />
+    </svg>
+    <svg width="1rem" height="1rem">
+      <use xlink:href="/media/icons.svg#by" />
+    </svg>
     | made with <a href="https://github.com/HenriTEL/gitblog" title="Gitblog">Gitblog</a>
 </footer>
