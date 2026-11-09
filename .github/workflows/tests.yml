@@ -1,0 +1,39 @@
+name: Tests
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set the git identity used by tests that create commits
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+      # The toolchain comes from rust-toolchain.toml.
+      - run: cargo test --locked
+
+  # Depends on the test job rather than using `gh pr merge --auto`, which only waits for checks
+  # that branch protection requires.
+  automerge:
+    needs: test
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v3
+      - name: Merge the grouped minor and patch updates
+        if: steps.metadata.outputs.dependency-group == 'minor-and-patch'
+        run: gh pr merge --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

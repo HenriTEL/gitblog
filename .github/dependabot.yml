@@ -4,6 +4,23 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 1
+    # High enough to never be reached: leaving this out would apply Dependabot's default of 5.
+    open-pull-requests-limit: 100
     cooldown:
       default-days: 7
+    groups:
+      # Dependabot cannot select crates by version, so this lists every direct dependency at 1.0
+      # or above: add new ones here. Crates at 0.x stay out on purpose because a minor bump can
+      # break them; they keep their own pull requests, which are merged by hand.
+      # The name is referenced by .github/workflows/tests.yml, which auto-merges this group.
+      minor-and-patch:
+        patterns:
+          - "clap"
+          - "flate2"
+          - "regex"
+          - "serde"
+          - "tempfile"
+          - "tera"
+        update-types:
+          - "minor"
+          - "patch"
