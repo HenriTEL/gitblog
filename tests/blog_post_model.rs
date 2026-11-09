@@ -32,7 +32,14 @@ fn builds_atom_feed_from_blog_posts() {
     second.publication_date = Some(parse_ts("2026-04-02T10:00:00+02:00"));
     let posts = vec![first, second];
 
-    let feed = build_feed_from_blog_posts("https://example.com/blog", &posts, None);
+    let feed = build_feed_from_blog_posts("https://example.com/blog", &posts, None, "Alice");
+    assert_eq!(feed.title, "The latest news from Alice");
+    assert_eq!(feed.subtitle.as_deref(), Some("The latest news from Alice"));
+    assert_eq!(feed.author.name, "Alice");
+    assert_eq!(
+        feed.logo.as_deref(),
+        Some("https://example.com/blog/media/favicon.svg")
+    );
     assert_eq!(feed.entries.len(), 2);
     assert_eq!(feed.updated.to_rfc3339(), "2026-04-02T10:00:00+02:00");
     assert_eq!(
@@ -76,7 +83,7 @@ fn writes_index_from_blog_posts() {
 
     let profile = UserProfileMeta {
         username: "author".into(),
-        bio: String::new(),
+        ..UserProfileMeta::default()
     };
 
     write_index_from_blog_posts(dir.path(), &profile, &posts);

@@ -1,8 +1,9 @@
 use std::{
+    collections::{HashMap, HashSet},
     error::Error,
     fmt, fs,
     io::{self, BufRead, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
 };
 
@@ -14,7 +15,8 @@ use gitblog::{
     git::{self, GitLocal, State},
     html::{markdown_file_to_html, write_index_from_blog_posts},
     repo_uri::{self, RepoUriError},
-    static_content::write_static_content,
+    static_content::{site_has_icon, write_static_content},
+    templates::install_blog_templates,
     user_profile::{
         GithubUserProfile, UserProfile, UserProfileDownloadError, UserProfileMeta, download_avatar,
     },
@@ -24,8 +26,17 @@ use clap::Parser;
 use gix::bstr::{BStr, BString};
 use gix::remote::Direction;
 use gix::url::Scheme;
+use tracing_core::{Event, Subscriber};
+use tracing_subscriber::{
+    Layer,
+    filter::LevelFilter,
+    layer::{Context, SubscriberExt},
+    util::SubscriberInitExt,
+};
 
 const MIN_UTC: chrono::DateTime<chrono::Utc> = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+/// Branch used when reading straight from a remote, where there is no `HEAD` to follow.
+const DEFAULT_REMOTE_BRANCH: &str = "main";
 
 /// URI did not designate a github.com Git remote, parsing failed, or profile download failed.
 #[derive(Debug)]
@@ -35,6 +46,7 @@ pub enum UpdateProfileError {
     RemoteLookup(String),
     UnsupportedRepositoryScheme(String),
     UnsupportedHost(String),
+    NoRemote,
     NonUtf8RepoPath,
     MissingRepoOwner,
     Download(UserProfileDownloadError),
@@ -55,6 +67,7 @@ impl fmt::Display for UpdateProfileError {
                     "unsupported host `{h}` (only github.com profiles are implemented)"
                 )
             }
+            UpdateProfileError::NoRemote => write!(f, "no git remote configured"),
             UpdateProfileError::NonUtf8RepoPath => write!(f, "repository path is not valid UTF-8"),
             UpdateProfileError::MissingRepoOwner => write!(
                 f,
@@ -108,6 +121,13 @@ pub fn update_profile(
     let bio = profile
         .get_about()
         .map_err(|e| UpdateProfileError::Download(e.into()))?;
+    let mut social_accounts = base_social_accounts();
+    social_accounts.insert("github".to_string(), profile.profile_url());
+    social_accounts.extend(
+        profile
+            .get_social_accounts()
+            .map_err(|e| UpdateProfileError::Download(e.into()))?,
+    );
 
     let avatar_path = dest.as_ref().join("media").join("avatar");
     if force_full || !avatar_path.is_file() {
@@ -118,13 +138,22 @@ pub fn update_profile(
             avatar_path.display()
         );
     }
-    Ok(UserProfileMeta { username, bio })
+    Ok(UserProfileMeta {
+        username,
+        bio,
+        social_accounts,
+        avatar_url: None,
+    })
+}
+
+fn base_social_accounts() -> HashMap<String, String> {
+    HashMap::from([("syndication".to_string(), "/atom.xml".to_string())])
 }
 
 /// Resolve the fetch remote URL from git config and update the profile when it points at GitHub.
 pub fn update_profile_for_local_repo(
     repo: &gix::Repository,
-    branch: &str,
+    branch: Option<&str>,
     dest: impl AsRef<Path>,
     force_full: bool,
 ) -> Result<UserProfileMeta, UpdateProfileError> {
@@ -136,21 +165,46 @@ pub fn update_profile_for_local_repo(
         Some(url) => Err(UpdateProfileError::UnsupportedRepositoryScheme(
             url.scheme.to_string(),
         )),
-        None => {
-            log::info!(
-                "no git remote configured; using fallback profile (set remote.origin.url for GitHub avatar)"
-            );
-            Ok(fallback_local_profile(repo))
+        None => Err(UpdateProfileError::NoRemote),
+    }
+}
+
+/// The hosting profile when there is one, else a profile named `fallback_name`.
+fn profile_or_fallback(
+    profile: Result<UserProfileMeta, UpdateProfileError>,
+    fallback_name: impl FnOnce() -> String,
+) -> UserProfileMeta {
+    match profile {
+        Ok(profile) => profile,
+        Err(
+            e @ (UpdateProfileError::UnsupportedHost(_)
+            | UpdateProfileError::UnsupportedRepositoryScheme(_)
+            | UpdateProfileError::NoRemote),
+        ) => {
+            log::info!("{e}; using fallback profile (no avatar or hosting links)");
+            UserProfileMeta {
+                username: fallback_name(),
+                social_accounts: base_social_accounts(),
+                ..UserProfileMeta::default()
+            }
         }
+        Err(e) => panic!("update profile: {e}"),
     }
 }
 
 fn resolve_fetch_remote_url(
     repo: &gix::Repository,
-    branch: &str,
+    branch: Option<&str>,
 ) -> Result<Option<gix::Url>, UpdateProfileError> {
+    let branch = branch.map(str::to_owned).or_else(|| {
+        let head = repo.head_name().ok().flatten()?;
+        Some(head.shorten().to_string())
+    });
     let mut candidates: Vec<BString> = Vec::new();
-    if let Some(name) = repo.branch_remote_name(BStr::new(branch.as_bytes()), Direction::Fetch) {
+    if let Some(name) = branch
+        .as_deref()
+        .and_then(|b| repo.branch_remote_name(BStr::new(b.as_bytes()), Direction::Fetch))
+    {
         candidates.push(name.as_ref().to_owned());
     }
     if let Some(name) = repo.remote_default_name(Direction::Fetch) {
@@ -184,7 +238,7 @@ fn fallback_local_profile(repo: &gix::Repository) -> UserProfileMeta {
         .unwrap_or_else(|| "blog".to_string());
     UserProfileMeta {
         username,
-        bio: String::new(),
+        ..UserProfileMeta::default()
     }
 }
 
@@ -206,17 +260,39 @@ fn github_owner_from_git_path(path: &[u8]) -> Result<String, UpdateProfileError>
         .ok_or(UpdateProfileError::MissingRepoOwner)
 }
 
+/// gix hands some events to the subscriber without asking whether they are enabled, which
+/// bypasses the log filter, so its most verbose level is enforced on every event.
+struct MaxEventLevel(LevelFilter);
+
+impl<S: Subscriber> Layer<S> for MaxEventLevel {
+    fn event_enabled(&self, event: &Event<'_>, _: Context<'_, S>) -> bool {
+        *event.metadata().level() <= self.0
+    }
+}
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct CliArgs {
-    /// Path or URL of the git repository containing the blog sources
+    /// Path or URL of the git repository containing the blog sources. A local path also publishes
+    /// its uncommitted changes, and never talks to the git remote
+    #[arg(env = "SOURCE_REPO", default_value = "./")]
     repo: String,
-    /// Branch on the git repository to use
-    #[arg(long, default_value = "main")]
-    branch: String,
-    /// URL where your blog is hosted
+    /// Branch on the git repository to use [default: the repository's HEAD when it is on disk,
+    /// `main` when reading from a remote without --clone-dir]
     #[arg(long)]
+    branch: Option<String>,
+    /// URL where your blog is hosted
+    #[arg(long, env = "BASE_URL")]
     blog_url: String,
+    /// Folder of the repository containing the blog, when it is not the repository root
+    #[arg(long)]
+    repo_subdir: Option<PathBuf>,
+    /// Keep a clone of the remote repository here and reuse it between builds
+    #[arg(long)]
+    clone_dir: Option<PathBuf>,
+    /// Do not look up a hosting profile: no avatar and no social links
+    #[arg(long)]
+    no_social: bool,
 
     /// Generate all blog files, not just the ones that changed
     #[arg(long)]
@@ -224,7 +300,8 @@ struct CliArgs {
     /// Generate Gemini (`.gmi`) output alongside HTML
     #[arg(long)]
     gemini: bool,
-    /// Use the local working tree only (no object database read). Only valid with a local repo path.
+    /// Build from the last commit already on disk: do not contact the git remote and ignore
+    /// uncommitted changes. A remote repository needs an existing --clone-dir
     #[arg(long)]
     no_fetch: bool,
     /// Directory to write generated blog files (created if missing)
@@ -252,9 +329,12 @@ fn main() -> ExitCode {
                 .expect("valid tracing directive"),
         );
 
+    let max_level = env_filter.max_level_hint().unwrap_or(LevelFilter::TRACE);
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(true)
+        .finish()
+        .with(MaxEventLevel(max_level))
         .init();
 
     let args = CliArgs::parse();
@@ -267,8 +347,8 @@ fn main() -> ExitCode {
         }
     };
 
-    if args.no_fetch && url.scheme != Scheme::File {
-        eprintln!("--no-fetch requires a local repository path");
+    if args.no_fetch && url.scheme != Scheme::File && args.clone_dir.is_none() {
+        eprintln!("--no-fetch with a remote repository requires --clone-dir");
         return ExitCode::FAILURE;
     }
 
@@ -276,6 +356,20 @@ fn main() -> ExitCode {
         eprintln!("--overwrite requires --output");
         return ExitCode::FAILURE;
     }
+
+    if args.clone_dir.is_some() && url.scheme == Scheme::File {
+        eprintln!("--clone-dir requires a remote repository");
+        return ExitCode::FAILURE;
+    }
+
+    let subdir = match args.repo_subdir.as_deref().map(normalize_repo_subdir) {
+        None => None,
+        Some(Ok(subdir)) => subdir,
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let output_dest = match args.output.as_ref() {
         Some(path) => match prepare_output_dir(path, args.overwrite) {
@@ -302,116 +396,202 @@ fn main() -> ExitCode {
         }
     };
 
+    let context = BuildContext {
+        args: &args,
+        up_to,
+        previous_feed: previous_feed.as_ref(),
+        output_dest,
+        subdir,
+    };
+
     match url.scheme {
-        Scheme::Http | Scheme::Https => {
-            let remote = gitblog::git::GitRemote {
-                url,
-                branch: args.branch.clone(),
-            };
-            if let Some(feed) = &previous_feed {
-                hydrate_blog_posts_from_atom_feed(feed, &args.blog_url);
-            }
-            let updated_file_blobs = if up_to == MIN_UTC.fixed_offset() {
-                vec![]
-            } else {
-                let tree_ends = remote.fetch_since(&up_to);
-                let diff = remote.tree_diff(&tree_ends.up_to_tree, &tree_ends.head_tree);
-                collect_updated_file_blobs(&diff)
-            };
-            let dest = remote
-                .pull_files(&updated_file_blobs, output_dest.clone())
-                .expect("fetch blobs");
-            let user_profile = update_profile(
-                &args.repo,
-                <PathBuf as AsRef<Path>>::as_ref(&dest),
-                args.full,
-            )
-            .expect("update profile");
-            finish_build(
-                &dest,
-                &args,
-                up_to,
-                previous_feed.as_ref(),
-                &user_profile,
-                updated_file_blobs,
-            );
-        }
-        Scheme::File => {
-            let repo_root = match repo_uri::file_url_to_path(&url) {
-                Ok(path) => path,
-                Err(e) => {
-                    eprintln!("{e}");
+        Scheme::Http | Scheme::Https | Scheme::Ssh => match args.clone_dir.as_ref() {
+            Some(clone_dir) => {
+                if args.no_fetch {
+                    if let Err(e) = gix::open(clone_dir) {
+                        eprintln!("no usable clone at {}: {e}", clone_dir.display());
+                        return ExitCode::FAILURE;
+                    }
+                } else if let Err(e) = git::sync_clone(&url, clone_dir) {
+                    eprintln!("failed to update clone at {}: {e}", clone_dir.display());
                     return ExitCode::FAILURE;
                 }
-            };
-            let repo = match gix::discover(&repo_root) {
-                Ok(repo) => repo,
-                Err(e) => {
-                    eprintln!("failed to open repository at {}: {e}", repo_root.display());
-                    return ExitCode::FAILURE;
-                }
-            };
-
-            if let Some(feed) = &previous_feed {
-                hydrate_blog_posts_from_atom_feed(feed, &args.blog_url);
+                build_from_local_repo(&context, clone_dir)
             }
-
-            let (dest, updated_file_blobs) = if args.no_fetch {
-                let dest = git::materialize_worktree_copy(&repo, output_dest.clone())
-                    .expect("copy worktree");
-                let blobs = if args.full || up_to == MIN_UTC.fixed_offset() {
-                    vec![]
-                } else {
-                    collect_worktree_blobs_since(&dest, &up_to)
-                };
-                (dest, blobs)
-            } else {
-                let local = GitLocal {
-                    repo_root: repo_root.clone(),
-                    branch: args.branch.clone(),
-                };
-                let updated_file_blobs = if up_to == MIN_UTC.fixed_offset() {
-                    vec![]
-                } else {
-                    let tree_ends = local.fetch_since(&up_to);
-                    let diff = local.tree_diff(&tree_ends.up_to_tree, &tree_ends.head_tree);
-                    collect_updated_file_blobs(&diff)
-                };
-                let dest = local
-                    .pull_files(&updated_file_blobs, output_dest.clone())
-                    .expect("materialize from object database");
-                (dest, updated_file_blobs)
-            };
-
-            if up_to == MIN_UTC.fixed_offset() {
-                let local = GitLocal {
-                    repo_root: repo_root.clone(),
-                    branch: args.branch.clone(),
-                };
-                local.index_publication_dates();
+            None => {
+                build_from_remote(&context, url);
+                ExitCode::SUCCESS
             }
-
-            let user_profile = update_profile_for_local_repo(&repo, &args.branch, &dest, args.full)
-                .expect("update profile");
-            finish_build(
-                &dest,
-                &args,
-                up_to,
-                previous_feed.as_ref(),
-                &user_profile,
-                updated_file_blobs,
-            );
-        }
+        },
+        Scheme::File => match repo_uri::file_url_to_path(&url) {
+            Ok(repo_root) => build_from_local_repo(&context, &repo_root),
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
         ref scheme => {
             eprintln!(
                 "The URL {} resolved to protocol {scheme} which is not supported.",
                 url
             );
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
     }
+}
 
+struct BuildContext<'a> {
+    args: &'a CliArgs,
+    up_to: DateTime<FixedOffset>,
+    previous_feed: Option<&'a feed::Feed>,
+    output_dest: Option<PathBuf>,
+    subdir: Option<PathBuf>,
+}
+
+impl BuildContext<'_> {
+    fn is_full(&self) -> bool {
+        self.up_to == MIN_UTC.fixed_offset()
+    }
+
+    /// A local path stands for the user's working copy; a clone is only a cache of the remote.
+    fn includes_uncommitted_changes(&self) -> bool {
+        !self.args.no_fetch && self.args.clone_dir.is_none()
+    }
+
+    fn hydrate_from_previous_feed(&self) {
+        if let Some(feed) = self.previous_feed {
+            hydrate_blog_posts_from_atom_feed(feed, &self.args.blog_url);
+        }
+    }
+}
+
+fn build_from_remote(context: &BuildContext<'_>, url: gix::Url) {
+    let args = context.args;
+    let remote = git::GitRemote {
+        url,
+        branch: args
+            .branch
+            .clone()
+            .unwrap_or_else(|| DEFAULT_REMOTE_BRANCH.to_string()),
+        subdir: context.subdir.clone(),
+    };
+    context.hydrate_from_previous_feed();
+    let tree_ends = remote.fetch_since((!context.is_full()).then_some(&context.up_to));
+    let updated_file_blobs = if context.is_full() {
+        vec![]
+    } else {
+        let diff = remote.tree_diff(&tree_ends.up_to_tree, &tree_ends.head_tree);
+        incremental_file_blobs(&diff, &tree_ends.head_tree)
+    };
+    let dest = remote
+        .pull_files(&updated_file_blobs, context.output_dest.clone())
+        .expect("fetch blobs");
+    let fallback_name = || {
+        tree_ends
+            .head_author
+            .clone()
+            .unwrap_or_else(|| "blog".to_string())
+    };
+    let user_profile = if args.no_social {
+        profile_without_hosting(fallback_name())
+    } else {
+        profile_or_fallback(update_profile(&args.repo, &dest, args.full), fallback_name)
+    };
+    finish_build(context, &dest, user_profile, updated_file_blobs);
+}
+
+fn build_from_local_repo(context: &BuildContext<'_>, repo_root: &Path) -> ExitCode {
+    let args = context.args;
+    let repo = match gix::discover(repo_root) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("failed to open repository at {}: {e}", repo_root.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    context.hydrate_from_previous_feed();
+    let local = GitLocal {
+        repo_root: repo_root.to_path_buf(),
+        branch: args.branch.clone(),
+        subdir: context.subdir.clone(),
+    };
+
+    let uncommitted = if context.includes_uncommitted_changes() {
+        local.uncommitted_changes().expect("read git status")
+    } else {
+        git::UncommittedChanges::default()
+    };
+
+    let updated_file_blobs = if context.is_full() {
+        vec![]
+    } else {
+        let tree_ends = local.fetch_since(&context.up_to);
+        let diff = local.tree_diff(&tree_ends.up_to_tree, &tree_ends.head_tree);
+        if uncommitted.affect_every_page() {
+            vec![]
+        } else {
+            incremental_file_blobs(&diff, &tree_ends.head_tree)
+        }
+    };
+    let dest = local
+        .pull_files(&updated_file_blobs, context.output_dest.clone())
+        .expect("materialize from object database");
+
+    if context.is_full() {
+        local.index_publication_dates();
+    }
+
+    if !uncommitted.files.is_empty() {
+        println!("Including {} uncommitted files", uncommitted.files.len());
+    }
+    uncommitted
+        .apply(
+            &dest,
+            Utc::now().fixed_offset(),
+            &args.frontmatter_delimiter,
+        )
+        .expect("apply uncommitted changes");
+
+    let fallback_name = || {
+        local
+            .head_author()
+            .unwrap_or_else(|| fallback_local_profile(&repo).username)
+    };
+    let user_profile = if args.no_social {
+        profile_without_hosting(fallback_name())
+    } else {
+        profile_or_fallback(
+            update_profile_for_local_repo(&repo, args.branch.as_deref(), &dest, args.full),
+            fallback_name,
+        )
+    };
+    finish_build(context, &dest, user_profile, updated_file_blobs);
     ExitCode::SUCCESS
+}
+
+fn profile_without_hosting(username: String) -> UserProfileMeta {
+    UserProfileMeta {
+        username,
+        ..UserProfileMeta::default()
+    }
+}
+
+/// `path` as a relative path made of plain folder names; `None` when it designates the root.
+fn normalize_repo_subdir(path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "--repo-subdir must be a relative path inside the repository, got {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok((!normalized.as_os_str().is_empty()).then_some(normalized))
 }
 
 /// Create `path` when missing; when it exists and is non-empty, clear it after confirmation or `--overwrite`.
@@ -496,79 +676,73 @@ fn clear_output_dir(path: &Path) -> io::Result<()> {
 }
 
 fn finish_build(
+    context: &BuildContext<'_>,
     dest: &Path,
-    args: &CliArgs,
-    up_to: DateTime<FixedOffset>,
-    previous_feed: Option<&feed::Feed>,
-    user_profile: &UserProfileMeta,
+    user_profile: UserProfileMeta,
     updated_file_blobs: Vec<git::FileBlob>,
 ) {
-    if args.no_fetch && up_to != MIN_UTC.fixed_offset() && !args.full {
-        refresh_blog_posts_from_worktree_since(dest, &up_to, &args.frontmatter_delimiter);
-    } else {
-        refresh_blog_posts_from_markdown(
-            dest,
-            &updated_file_blobs,
-            args.full,
-            &args.frontmatter_delimiter,
-        );
+    let args = context.args;
+    if let Err(e) = install_blog_templates(dest) {
+        panic!("invalid file in templates/: {}", error_chain(&e));
     }
+    let user_profile = profile_for_output(user_profile, dest);
+    refresh_blog_posts_from_markdown(
+        dest,
+        &updated_file_blobs,
+        args.full,
+        &args.frontmatter_delimiter,
+    );
     prune_blog_posts_missing_from_worktree(dest);
     let posts = publishable_blog_posts(git::all_blog_posts(), dest);
     render_markdown_files(
-        user_profile,
+        &user_profile,
         dest,
         &posts,
         &args.frontmatter_delimiter,
         args.gemini,
     );
-    let generated_feed = feed::build_feed_from_blog_posts(&args.blog_url, &posts, previous_feed);
+    let generated_feed = feed::build_feed_from_blog_posts(
+        &args.blog_url,
+        &posts,
+        context.previous_feed,
+        &user_profile.username,
+    );
     let xml = feed::generate(&generated_feed).expect("generate atom feed");
     std::fs::write(dest.join("atom.xml"), &xml).expect("write atom feed");
     println!("wrote atom.xml");
-    write_index_from_blog_posts(dest, user_profile, &posts);
+    write_index_from_blog_posts(dest, &user_profile, &posts);
     println!("wrote index.html");
     if args.gemini {
         write_index_gemtext(dest, &posts).expect("write gemini index");
         println!("wrote index.gmi");
     }
-    if up_to == MIN_UTC.fixed_offset() {
+    if context.is_full() || updated_file_blobs.is_empty() {
         write_static_content(dest);
     }
     println!("Blog built at {} ", dest.display());
 }
 
-/// Blobs for markdown files in `dest` modified after `up_to` (for `--no-fetch` incremental builds).
-fn collect_worktree_blobs_since(dest: &Path, up_to: &DateTime<FixedOffset>) -> Vec<git::FileBlob> {
-    let mut blobs = Vec::new();
-    walk_markdown_files(dest, &mut |abs, rel| {
-        let ts = file_last_updated(abs);
-        if ts <= *up_to {
-            return;
-        }
-        let content = std::fs::read(abs).expect("read markdown");
-        let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &content);
-        blobs.push(git::FileBlob {
-            file_path: rel.to_path_buf(),
-            oid,
-        });
-    });
-    blobs
+fn error_chain(error: &dyn Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
 }
 
-fn refresh_blog_posts_from_worktree_since(
-    dest: &Path,
-    up_to: &DateTime<FixedOffset>,
-    frontmatter_delimiter: &str,
-) {
-    walk_markdown_files(dest, &mut |abs, rel| {
-        let ts = file_last_updated(abs);
-        if ts <= *up_to {
-            return;
-        }
-        let md = std::fs::read_to_string(abs).expect("read markdown");
-        git::update_blog_post_from_markdown_path(rel.to_path_buf(), &md, ts, frontmatter_delimiter);
-    });
+/// Fills in what depends on the generated site: the avatar, and the links that have an icon.
+fn profile_for_output(mut profile: UserProfileMeta, dest: &Path) -> UserProfileMeta {
+    profile.avatar_url = dest
+        .join("media")
+        .join("avatar")
+        .is_file()
+        .then(|| "/media/avatar".to_string());
+    profile
+        .social_accounts
+        .retain(|icon, _| site_has_icon(dest, icon));
+    profile
 }
 
 fn render_markdown_files(
@@ -589,8 +763,30 @@ fn render_markdown_files(
     });
 }
 
+/// Files to pull for an incremental build. An empty list makes the pull step check out the whole
+/// tree, which is what a change to the templates or stylesheets needs.
+fn incremental_file_blobs(
+    diff: &HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
+    head_tree: &gix::objs::Tree,
+) -> Vec<git::FileBlob> {
+    if diff.keys().any(|path| git::changes_every_page(path)) {
+        return Vec::new();
+    }
+    let mut blobs = collect_updated_file_blobs(diff);
+    if blobs.is_empty() {
+        return blobs;
+    }
+    let pulled: HashSet<PathBuf> = blobs.iter().map(|b| b.file_path.clone()).collect();
+    blobs.extend(
+        git::blobs_needed_for_rendering(head_tree)
+            .into_iter()
+            .filter(|blob| !pulled.contains(&blob.file_path)),
+    );
+    blobs
+}
+
 fn collect_updated_file_blobs(
-    diff: &std::collections::HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
+    diff: &HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
 ) -> Vec<gitblog::git::FileBlob> {
     diff.iter()
         .filter_map(|(path, (state, maybe_oid))| {
@@ -628,7 +824,7 @@ fn fetch_atom_feed(blog_url: &str) -> Result<feed::Feed, Box<dyn Error>> {
 fn publishable_blog_posts(posts: Vec<BlogPost>, dest: &Path) -> Vec<BlogPost> {
     posts
         .into_iter()
-        .filter(|p| !gitblog::path_is_ignored(&p.path, false))
+        .filter(|p| !gitblog::path_is_not_a_post(&p.path))
         .filter(|p| p.path.extension().is_some_and(|e| e == "md"))
         .filter(|p| dest.join(&p.path).is_file())
         .collect()
@@ -647,13 +843,15 @@ fn prune_blog_posts_missing_from_worktree(dest: &Path) {
 fn hydrate_blog_posts_from_atom_feed(feed: &feed::Feed, blog_url: &str) {
     for entry in &feed.entries {
         let path = source_path_from_entry_url(blog_url, &entry.link.href);
-        let post = BlogPost::from_source(
+        let mut post = BlogPost::from_source(
             path.clone(),
             entry.title.clone(),
             entry.summary.clone(),
             entry.updated,
             entry.effective_published(),
         );
+        // Feeds without `<published>` must not hide the date found in the git history.
+        post.publication_date = entry.published;
         git::update_blog_post_from_atom(path, post);
     }
 }
@@ -667,7 +865,9 @@ fn refresh_blog_posts_from_markdown(
     if full || blobs.is_empty() {
         walk_markdown_files(dest, &mut |abs, rel| {
             let md = std::fs::read_to_string(abs).expect("read markdown");
-            let ts = file_last_updated(abs);
+            let ts = gitblog::blog_post::get_by_path(rel)
+                .map(|p| p.last_updated)
+                .unwrap_or_else(|| file_last_updated(abs));
             git::update_blog_post_from_markdown_path(
                 rel.to_path_buf(),
                 &md,
@@ -714,7 +914,7 @@ fn walk_markdown_files(dir: &Path, f: &mut impl FnMut(&Path, &Path)) {
 }
 
 fn markdown_is_ignored(relative_path: &Path) -> bool {
-    gitblog::path_is_ignored(relative_path, false)
+    gitblog::path_is_not_a_post(relative_path)
 }
 
 fn source_path_from_entry_url(blog_url: &str, entry_url: &str) -> std::path::PathBuf {

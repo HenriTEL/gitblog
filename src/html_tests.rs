@@ -15,7 +15,7 @@ fn markdown_to_full_html_page() {
     writeln!(f, "# Hello\n\nBody **bold**.").unwrap();
     let profile = UserProfileMeta {
         username: "tester".into(),
-        bio: String::new(),
+        ..UserProfileMeta::default()
     };
     markdown_file_to_html(&profile, f.path(), Path::new("post.md"), "---");
     let html_path = f.path().with_extension("html");
@@ -61,7 +61,7 @@ fn markdown_uses_blog_post_metadata_for_article_dates() {
 
     let profile = UserProfileMeta {
         username: "tester".into(),
-        bio: String::new(),
+        ..UserProfileMeta::default()
     };
     markdown_file_to_html(&profile, f.path(), Path::new("notes/from-store.md"), "---");
     let html = std::fs::read_to_string(f.path().with_extension("html")).unwrap();

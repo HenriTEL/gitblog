@@ -12,8 +12,9 @@
 - `src/repo_uri.rs`: parses `repo` CLI values as remote URLs or local paths (`Scheme::File`).
 - `src/html.rs`: HTML page generation and Tera template rendering.
 - `src/markdown.rs`: Markdown parsing and HTML conversion with `comrak`.
-- `src/templates.rs`: Tera environment setup and embedded template loading.
-- `src/static_content.rs`: copies non-markdown site assets to output.
+- `src/markdown_extensions.rs`: abbreviations, attribute lists, Markdown in HTML blocks, `[TOC]`.
+- `src/templates.rs`: Tera environment setup, embedded templates and the blog's `templates/` overrides.
+- `src/static_content.rs`: writes bundled media and `style.css`; the blog's own files take precedence.
 - `templates/`: Tera templates (`article.html.j2`, `index.html.j2`, partials).
 - `css/`: stylesheet assets served by generated pages.
 - `media/`: images and static media files.
@@ -22,7 +23,7 @@
 ## Runtime flow (high level)
 1. Parse CLI args (`repo`, `branch`, `blog_url`, `--full`, optional `--gemini`).
 2. Fetch existing Atom feed to determine incremental cutoff.
-3. Pull changed files or full tree from remote Git repository.
+3. Pull changed files or full tree from Git. A local path never fetches and overlays its uncommitted changes (dated now) unless `--no-fetch`, which builds the last commit on disk.
 4. Refresh post metadata from markdown and/or feed state.
 5. Render markdown posts to HTML and build `index.html` (and Gemini `.gmi` output only when `--gemini` is set).
 6. Generate `atom.xml` and copy static assets when needed.

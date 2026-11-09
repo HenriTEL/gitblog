@@ -1,5 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
-use comrak::markdown_to_html;
+
+use crate::markdown_extensions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
@@ -377,7 +378,7 @@ pub fn markdown_fragment_to_plain_text(markdown: &str) -> String {
     strip_html_tags_collapse_ws(&html)
 }
 
-fn strip_html_tags_collapse_ws(html: &str) -> String {
+pub(crate) fn strip_html_tags_collapse_ws(html: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
     for ch in html.chars() {
@@ -416,9 +417,14 @@ pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> S
 
     options.extension.alerts = true;
 
+    options.extension.description_lists = true;
+
     options.extension.front_matter_delimiter = frontmatter_delimiter_option(frontmatter_delimiter);
 
-    markdown_to_html(markdown, &options)
+    // Posts are written by the blog's owner, so inline HTML is trusted.
+    options.render.r#unsafe = true;
+
+    markdown_extensions::render(markdown, &options)
 }
 
 #[cfg(test)]

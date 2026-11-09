@@ -65,3 +65,11 @@ fn writes_sorted_index_gemtext() {
         .expect("older entry");
     assert!(newer_idx < older_idx);
 }
+
+#[test]
+fn markdown_extension_markup_is_left_out() {
+    let gemtext = markdown_to_gemtext(
+        "[TOC]\n\n## Title {: #custom }\n\nText\n{: .lead }\n\n*[HTML]: Hyper Text\n\n```\n[TOC]\n```\n",
+    );
+    assert_eq!(gemtext, "\n## Title\n\nText\n\n\n```\n[TOC]\n```\n");
+}

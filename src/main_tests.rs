@@ -11,9 +11,11 @@ use gix::url::Scheme;
 use tempfile::tempdir_in;
 
 use super::{
-    CliArgs, clear_output_dir, collect_updated_file_blobs, fallback_local_profile,
-    github_owner_from_git_path, is_github_dot_com_host, list_output_dir_toplevel,
-    output_dir_is_nonempty, prepare_output_dir, render_markdown_files, resolve_fetch_remote_url,
+    BuildContext, CliArgs, MIN_UTC, UpdateProfileError, clear_output_dir,
+    collect_updated_file_blobs, fallback_local_profile, github_owner_from_git_path,
+    incremental_file_blobs, is_github_dot_com_host, list_output_dir_toplevel,
+    normalize_repo_subdir, output_dir_is_nonempty, prepare_output_dir, profile_for_output,
+    profile_or_fallback, render_markdown_files, resolve_fetch_remote_url,
 };
 
 fn test_git_dir() -> PathBuf {
@@ -93,7 +95,7 @@ fn resolve_fetch_remote_url_reads_origin() {
     );
     std::fs::write(&config_path, config).expect("write config");
     let repo = gix::discover(dir.path()).expect("discover");
-    let url = resolve_fetch_remote_url(&repo, "main")
+    let url = resolve_fetch_remote_url(&repo, Some("main"))
         .expect("resolve")
         .expect("origin url");
     assert_eq!(url.scheme, Scheme::Https);
@@ -111,6 +113,111 @@ fn fallback_local_profile_uses_directory_name() {
         dir.path().file_name().unwrap().to_str().unwrap()
     );
     assert!(profile.bio.is_empty());
+}
+
+#[test]
+fn repo_defaults_to_the_current_directory() {
+    let args = CliArgs::parse_from(["gitblog", "--blog-url", "https://example.com"]);
+    assert_eq!(args.repo, "./");
+    assert!(args.output.is_none());
+}
+
+#[test]
+fn blog_url_stays_required() {
+    assert!(
+        CliArgs::try_parse_from(["gitblog", "./"]).is_err() || std::env::var("BASE_URL").is_ok()
+    );
+}
+
+#[test]
+fn source_options_parse() {
+    let args = CliArgs::parse_from([
+        "gitblog",
+        "https://example.com/repo.git",
+        "--blog-url",
+        "https://example.com",
+        "--repo-subdir",
+        "site/blog",
+        "--clone-dir",
+        "/tmp/clone",
+        "--no-social",
+    ]);
+    assert_eq!(args.repo_subdir.as_deref(), Some(Path::new("site/blog")));
+    assert_eq!(args.clone_dir.as_deref(), Some(Path::new("/tmp/clone")));
+    assert!(args.no_social);
+}
+
+#[test]
+fn normalize_repo_subdir_accepts_relative_folders_only() {
+    assert_eq!(
+        normalize_repo_subdir(Path::new("./site/blog/")).unwrap(),
+        Some(PathBuf::from("site/blog"))
+    );
+    assert_eq!(normalize_repo_subdir(Path::new(".")).unwrap(), None);
+    assert!(normalize_repo_subdir(Path::new("../other")).is_err());
+    assert!(normalize_repo_subdir(Path::new("/etc")).is_err());
+}
+
+#[test]
+fn hosts_without_a_profile_fall_back_to_the_given_name() {
+    let profile = profile_or_fallback(
+        Err(UpdateProfileError::UnsupportedHost("gitlab.com".into())),
+        || "Ada".to_string(),
+    );
+    assert_eq!(profile.username, "Ada");
+    assert_eq!(
+        profile
+            .social_accounts
+            .get("syndication")
+            .map(String::as_str),
+        Some("/atom.xml")
+    );
+    assert!(profile.avatar_url.is_none());
+
+    let no_remote = profile_or_fallback(Err(UpdateProfileError::NoRemote), || "Ada".to_string());
+    assert_eq!(no_remote.username, "Ada");
+}
+
+#[test]
+fn profile_for_output_reports_avatar_and_drops_links_without_icons() {
+    let dir = tempdir_in(test_git_dir()).expect("tempdir");
+    let profile = UserProfileMeta {
+        username: "u".into(),
+        social_accounts: HashMap::from([
+            ("github".to_string(), "https://github.com/u".to_string()),
+            ("bluesky".to_string(), "https://bsky.app/u".to_string()),
+        ]),
+        ..UserProfileMeta::default()
+    };
+
+    let without_avatar = profile_for_output(profile.clone(), dir.path());
+    assert!(without_avatar.avatar_url.is_none());
+    assert!(without_avatar.social_accounts.contains_key("github"));
+    assert!(!without_avatar.social_accounts.contains_key("bluesky"));
+
+    std::fs::create_dir_all(dir.path().join("media")).expect("media");
+    std::fs::write(dir.path().join("media/avatar"), "img").expect("avatar");
+    let with_avatar = profile_for_output(profile, dir.path());
+    assert_eq!(with_avatar.avatar_url.as_deref(), Some("/media/avatar"));
+}
+
+#[test]
+fn template_or_stylesheet_changes_force_a_full_checkout() {
+    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, b"x");
+    let head = gix::objs::Tree { entries: vec![] };
+    for changed in ["templates/navbar.html.j2", "css/theme.css"] {
+        let mut diff: HashMap<PathBuf, (gitblog::git::State, Option<gix::ObjectId>)> =
+            HashMap::new();
+        diff.insert(
+            PathBuf::from("tech/post.md"),
+            (gitblog::git::State::Modified, Some(oid)),
+        );
+        diff.insert(
+            PathBuf::from(changed),
+            (gitblog::git::State::Modified, Some(oid)),
+        );
+        assert!(incremental_file_blobs(&diff, &head).is_empty(), "{changed}");
+    }
 }
 
 #[test]
@@ -146,6 +253,51 @@ fn no_fetch_flag_parses() {
         "--no-fetch",
     ]);
     assert!(args.no_fetch);
+}
+
+fn includes_uncommitted_changes(cli: &[&str]) -> bool {
+    let args = CliArgs::parse_from(cli);
+    let context = BuildContext {
+        args: &args,
+        up_to: MIN_UTC.fixed_offset(),
+        previous_feed: None,
+        output_dest: None,
+        subdir: None,
+    };
+    context.includes_uncommitted_changes()
+}
+
+#[test]
+fn only_a_local_path_without_no_fetch_includes_uncommitted_changes() {
+    let base = ["gitblog", "--blog-url", "https://example.com"];
+    assert!(includes_uncommitted_changes(&base));
+    assert!(includes_uncommitted_changes(
+        &[&base[..], &["./blog"]].concat()
+    ));
+    assert!(!includes_uncommitted_changes(
+        &[&base[..], &["--no-fetch"]].concat()
+    ));
+    assert!(!includes_uncommitted_changes(
+        &[
+            &base[..],
+            &["https://example.com/repo.git", "--clone-dir", "/tmp/clone"]
+        ]
+        .concat()
+    ));
+}
+
+#[test]
+fn branch_is_unset_unless_requested() {
+    let args = CliArgs::parse_from(["gitblog", "--blog-url", "https://example.com"]);
+    assert_eq!(args.branch, None);
+    let args = CliArgs::parse_from([
+        "gitblog",
+        "--blog-url",
+        "https://example.com",
+        "--branch",
+        "published",
+    ]);
+    assert_eq!(args.branch.as_deref(), Some("published"));
 }
 
 #[test]
@@ -242,7 +394,7 @@ fn render_markdown_files_removes_markdown_after_html_write() {
     render_markdown_files(
         &UserProfileMeta {
             username: "u".into(),
-            bio: String::new(),
+            ..UserProfileMeta::default()
         },
         dir.path(),
         &[] as &[BlogPost],
@@ -267,7 +419,7 @@ fn render_markdown_files_removes_markdown_after_html_and_gemini() {
     render_markdown_files(
         &UserProfileMeta {
             username: "u".into(),
-            bio: String::new(),
+            ..UserProfileMeta::default()
         },
         dir.path(),
         &[] as &[BlogPost],

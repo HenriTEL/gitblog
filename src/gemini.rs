@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::blog_post::{BlogPost, fallback_title};
 use crate::markdown::article_render_parts;
+use crate::markdown_extensions::{is_markup_only_line, strip_trailing_attr_list};
 
 pub fn markdown_file_to_gemtext(
     markdown_path: &Path,
@@ -44,6 +45,11 @@ pub fn markdown_to_gemtext(markdown: &str) -> String {
             output.push('\n');
             continue;
         }
+
+        if is_markup_only_line(trimmed) {
+            continue;
+        }
+        let trimmed = strip_trailing_attr_list(trimmed);
 
         if let Some((url, label)) = parse_standalone_link(trimmed) {
             output.push_str("=> ");

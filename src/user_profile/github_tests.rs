@@ -1,6 +1,35 @@
 use crate::user_profile::strip_github_profile_og_suffix;
 
-use super::parse_github_meta;
+use super::{parse_github_meta, parse_github_social_accounts};
+
+const SOCIAL_FIXTURE: &str = r#"<ul class="vcard-details">
+<li itemprop="url" class="vcard-detail"><svg class="octicon"></svg>
+  <a rel="nofollow me" href="https://example.com">https://example.com</a></li>
+<li itemprop="social" class="vcard-detail"><svg role="img" class="octicon"><title id="a1">X</title></svg>
+  <a rel="nofollow me" href="https://x.com/alice">@alice</a></li>
+<li itemprop="social" class="vcard-detail"><svg role="img" class="octicon"><title id="a2">Mastodon</title><path d="M0"></path></svg>
+  <a rel="nofollow me" href="https://fedi.example/@alice">@alice@fedi.example</a></li>
+<li itemprop="homeLocation"><a href="https://example.com/not-social">Paris</a></li>
+</ul>"#;
+
+#[test]
+fn parses_social_accounts_and_skips_other_profile_links() {
+    assert_eq!(
+        parse_github_social_accounts(SOCIAL_FIXTURE),
+        vec![
+            ("twitter".to_string(), "https://x.com/alice".to_string()),
+            (
+                "mastodon".to_string(),
+                "https://fedi.example/@alice".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn profile_without_social_accounts_yields_none() {
+    assert!(parse_github_social_accounts(FIXTURE).is_empty());
+}
 
 const FIXTURE: &str = r#"<!DOCTYPE html>
 <html lang="en">

@@ -2,6 +2,7 @@
 
 pub mod github;
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -17,6 +18,9 @@ pub trait UserProfile {
     fn get_username(&self) -> Result<String, UserProfileError>;
 
     fn get_about(&self) -> Result<String, UserProfileError>;
+
+    /// `(provider, url)` pairs for the social accounts listed on the profile; `provider` is lowercase.
+    fn get_social_accounts(&self) -> Result<Vec<(String, String)>, UserProfileError>;
 
     fn fetch_avatar(&self) -> Result<AvatarData, UserProfileError>;
 }
@@ -65,12 +69,15 @@ impl From<reqwest::Error> for UserProfileError {
     }
 }
 
-/// Username and biography for templates (assembled by callers from [`UserProfile::get_username`]
-/// and [`UserProfile::get_about`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Author details for templates (assembled by callers from [`UserProfile`] or the git history).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UserProfileMeta {
     pub username: String,
     pub bio: String,
+    /// Footer links, keyed by icon name in `media/icons.svg`.
+    pub social_accounts: HashMap<String, String>,
+    /// Site-relative avatar URL; `None` when the site has no avatar.
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -115,6 +122,9 @@ pub fn download_avatar(
     dest: &Path,
 ) -> Result<(), UserProfileDownloadError> {
     let avatar = provider.fetch_avatar()?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(dest, avatar.bytes)?;
     info!("Updated user profile avatar");
     Ok(())

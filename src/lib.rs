@@ -8,12 +8,33 @@ pub mod gemini;
 pub mod git;
 pub mod html;
 pub mod markdown;
+mod markdown_extensions;
 pub mod repo_uri;
 pub mod static_content;
-pub(crate) mod templates;
+pub mod templates;
 pub mod user_profile;
 
-pub const IGNORE_FILES: &[&str] = &["**/*.draft.md", "**/draft.md", "LICENSE.md", "README.md"];
+/// Source paths that never reach the output.
+pub const IGNORE_FILES: &[&str] = &[
+    "**/*.draft.md",
+    "**/draft.md",
+    "**/draft/",
+    "**/.github/",
+    "LICENSE.md",
+    "README.md",
+];
+
+/// Folders holding site assets: their files are kept, but Markdown inside them is not a post.
+const NON_POST_DIRS: &[&str] = &["media", "templates"];
+
+/// Whether a Markdown file at `relative_path` must not be treated as a blog post.
+#[must_use]
+pub fn path_is_not_a_post(relative_path: &Path) -> bool {
+    path_is_ignored(relative_path, false)
+        || relative_path
+            .components()
+            .any(|c| NON_POST_DIRS.iter().any(|dir| c.as_os_str() == *dir))
+}
 
 pub fn path_is_ignored(relative_path: &Path, is_dir: bool) -> bool {
     let mut builder = GitignoreBuilder::new("/");

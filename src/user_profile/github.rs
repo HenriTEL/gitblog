@@ -22,13 +22,33 @@ const FETCH_TIMEOUT_SECS: u64 = 10;
 struct ElementInner {
     name: QualName,
     attrs: RefCell<Vec<Attribute>>,
+    text: RefCell<String>,
 }
 
 fn empty_fragment_placeholder() -> Rc<ElementInner> {
     Rc::new(ElementInner {
         name: QualName::new(None, "".into(), "fragment".into()),
         attrs: RefCell::new(Vec::new()),
+        text: RefCell::new(String::new()),
     })
+}
+
+impl ElementInner {
+    fn attr(&self, name: &str) -> Option<String> {
+        self.attrs
+            .borrow()
+            .iter()
+            .find(|attr| attr.name.local.as_ref() == name)
+            .map(|attr| attr.value.to_string())
+    }
+}
+
+/// Maps the provider label GitHub shows on a profile to its icon name in `media/icons.svg`.
+fn provider_icon_name(label: &str) -> String {
+    match label.trim().to_lowercase().as_str() {
+        "x" => "twitter".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Minimal [`TreeSink`](html5ever::tree_builder::TreeSink): retains every created element + merged attrs.
@@ -72,6 +92,29 @@ impl MetaExtractSink {
             visit(&node);
         }
         (username, image, description)
+    }
+
+    /// Reads `<li itemprop="social"><svg><title>Provider</title></svg><a href="…">` entries, relying
+    /// on nodes being retained in document order.
+    fn into_social_accounts(self) -> Vec<(String, String)> {
+        let mut accounts = Vec::new();
+        let mut in_social_item = false;
+        let mut provider = None::<String>;
+        for node in self.nodes.into_inner() {
+            let local = node.name.local.as_ref();
+            if local == "li" {
+                in_social_item = node.attr("itemprop").as_deref() == Some("social");
+                provider = None;
+            } else if in_social_item && local == "title" {
+                provider = Some(provider_icon_name(&node.text.borrow()));
+            } else if in_social_item && local == "a" {
+                if let (Some(name), Some(href)) = (provider.take(), node.attr("href")) {
+                    accounts.push((name, href));
+                }
+                in_social_item = false;
+            }
+        }
+        accounts
     }
 }
 
@@ -117,6 +160,7 @@ impl TreeSink for MetaExtractSink {
         let node = Rc::new(ElementInner {
             name,
             attrs: RefCell::new(attrs),
+            text: RefCell::new(String::new()),
         });
         self.nodes.borrow_mut().push(node.clone());
         if flags.template {
@@ -146,7 +190,11 @@ impl TreeSink for MetaExtractSink {
     ) {
     }
 
-    fn append(&self, _parent: &Self::Handle, _child: NodeOrText<Self::Handle>) {}
+    fn append(&self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        if let NodeOrText::AppendText(text) = child {
+            parent.text.borrow_mut().push_str(&text);
+        }
+    }
 
     fn append_doctype_to_document(&self, _: StrTendril, _: StrTendril, _: StrTendril) {}
 
@@ -174,6 +222,7 @@ impl MetaExtractSink {
             document: Rc::new(ElementInner {
                 name: QualName::new(None, "".into(), "document".into()),
                 attrs: RefCell::new(Vec::new()),
+                text: RefCell::new(String::new()),
             }),
             nodes: RefCell::new(Vec::new()),
             template_fragments: RefCell::new(Vec::new()),
@@ -232,6 +281,13 @@ fn parse_github_meta(html: &str) -> (Option<String>, Option<String>, Option<Stri
         .into_github_metas()
 }
 
+fn parse_github_social_accounts(html: &str) -> Vec<(String, String)> {
+    parse_document(MetaExtractSink::new(), Default::default())
+        .one(html)
+        .finish()
+        .into_social_accounts()
+}
+
 fn default_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
@@ -252,6 +308,10 @@ impl UserProfile for GithubUserProfile {
             .map(|d| strip_github_profile_og_suffix(&d))
             .unwrap_or_default();
         Ok(bio)
+    }
+
+    fn get_social_accounts(&self) -> Result<Vec<(String, String)>, UserProfileError> {
+        Ok(parse_github_social_accounts(self.profile_html()?.as_str()))
     }
 
     fn fetch_avatar(&self) -> Result<AvatarData, UserProfileError> {

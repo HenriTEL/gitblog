@@ -61,6 +61,7 @@ pub fn build_feed_from_blog_posts(
     blog_url: &str,
     posts: &[BlogPost],
     previous: Option<&Feed>,
+    author: &str,
 ) -> Feed {
     let base_url = blog_url.trim_end_matches('/');
     let mut sorted_posts = posts.to_vec();
@@ -102,26 +103,23 @@ pub fn build_feed_from_blog_posts(
         .map(|p| p.last_updated)
         .max()
         .unwrap_or(fallback_updated);
+    let description = format!("The latest news from {author}");
 
     Feed {
         id: previous
             .map(|f| f.id.clone())
             .unwrap_or_else(|| format!("{base_url}/atom.xml")),
-        title: previous
-            .map(|f| f.title.clone())
-            .unwrap_or_else(|| "Blog".to_string()),
+        title: description.clone(),
         updated,
         author: Author {
-            name: previous
-                .map(|f| f.author.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string()),
+            name: author.to_string(),
         },
         link: Link {
             href: base_url.to_string(),
             rel: "alternate".to_string(),
         },
-        logo: previous.and_then(|f| f.logo.clone()),
-        subtitle: previous.and_then(|f| f.subtitle.clone()),
+        logo: Some(format!("{base_url}/media/favicon.svg")),
+        subtitle: Some(description),
         entries,
     }
 }

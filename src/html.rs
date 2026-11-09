@@ -34,6 +34,7 @@ struct ArticlePageContext {
     main_content: String,
     sections: Vec<String>,
     author_name: String,
+    avatar_url: Option<String>,
     social_accounts: HashMap<String, String>,
 }
 
@@ -133,8 +134,8 @@ fn write_index_at(
         user_profile.username.clone(),
         rendered_posts,
         sections.to_vec(),
-        None,
-        HashMap::new(),
+        user_profile.avatar_url.clone(),
+        user_profile.social_accounts.clone(),
     )
     .expect("render index");
     std::fs::write(dest.join("index.html"), html).expect("write index");
@@ -210,7 +211,8 @@ pub fn markdown_file_to_html(
         main_content,
         sections,
         author_name: user_profile.username.clone(),
-        social_accounts: HashMap::new(),
+        avatar_url: user_profile.avatar_url.clone(),
+        social_accounts: user_profile.social_accounts.clone(),
     };
 
     let tera = templates::tera();

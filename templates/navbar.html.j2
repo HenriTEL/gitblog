@@ -1,5 +1,5 @@
 <nav>
-  <a href="/"><img class="icon" heigth="48" width="48" src="/media/avatar" alt="Blog's logo">
+  <a href="/">{% if avatar_url %}<img class="icon" heigth="48" width="48" src="{{ avatar_url }}" alt="Blog's logo">{% endif %}
     {{ author_name }}'s Blog
   </a>
   {%- for section in sections %}

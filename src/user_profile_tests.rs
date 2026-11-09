@@ -38,6 +38,10 @@ impl UserProfile for StubProfile {
         Ok("About me.".into())
     }
 
+    fn get_social_accounts(&self) -> Result<Vec<(String, String)>, UserProfileError> {
+        Ok(Vec::new())
+    }
+
     fn fetch_avatar(&self) -> Result<AvatarData, UserProfileError> {
         Ok(AvatarData {
             bytes: vec![7, 7, 7],

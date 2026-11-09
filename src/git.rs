@@ -1,26 +1,31 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gix::revision::walk::Sorting;
 
-use gix::bstr::{BString, ByteSlice};
+use gix::bstr::{BStr, BString, ByteSlice};
 use gix::objs::Tree;
 use gix::objs::{CommitRef, TreeRef};
 use gix::progress;
 use gix::protocol::handshake::Ref;
-use gix::protocol::transport::client::http;
+use gix::protocol::transport::client::{self, Transport};
 use gix::protocol::transport::packetline::read::ProgressAction;
 use gix::protocol::{Command, fetch, ls_refs};
 use gix_pack::cache;
 use gix_pack::data::decode::entry::ResolvedBase;
 
 use chrono::{DateTime, FixedOffset};
+use gix::remote::Direction;
+use gix::status::{Item as StatusItem, Submodule, UntrackedFiles, tree_index::TrackRenames};
 use gix::url::Url;
 use tempfile::NamedTempFile;
 
@@ -38,12 +43,17 @@ pub enum State {
 pub struct GitRemote {
     pub url: Url,
     pub branch: String,
+    /// Folder of the repository holding the blog; `None` for the repository root.
+    pub subdir: Option<PathBuf>,
 }
 
 /// A local git repository on disk.
 pub struct GitLocal {
     pub repo_root: PathBuf,
-    pub branch: String,
+    /// Branch to read; `None` for whatever `HEAD` designates.
+    pub branch: Option<String>,
+    /// Folder of the repository holding the blog; `None` for the repository root.
+    pub subdir: Option<PathBuf>,
 }
 
 pub struct CommitEnds {
@@ -54,11 +64,104 @@ pub struct CommitEnds {
 pub struct TreeEnds {
     pub up_to_tree: gix::objs::Tree,
     pub head_tree: gix::objs::Tree,
+    /// Author name of the branch tip.
+    pub head_author: Option<String>,
 }
 
 pub struct FileBlob {
     pub file_path: PathBuf,
     pub oid: gix::ObjectId,
+}
+
+/// Files of the working tree that differ from the last commit and belong on the site.
+#[derive(Default)]
+pub struct UncommittedChanges {
+    /// Folder of the working tree holding the blog.
+    blog_root: PathBuf,
+    /// Changed files, relative to the blog folder.
+    pub files: BTreeMap<PathBuf, State>,
+}
+
+impl UncommittedChanges {
+    /// Whether one of the files affects every generated page.
+    #[must_use]
+    pub fn affect_every_page(&self) -> bool {
+        self.files.keys().any(|path| changes_every_page(path))
+    }
+
+    /// Replays the changes onto the sources in `dest`, recording `now` as the update date of the
+    /// articles among them. Call once the git history has been applied to the blog post store.
+    pub fn apply(
+        &self,
+        dest: &Path,
+        now: DateTime<FixedOffset>,
+        frontmatter_delimiter: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Deletions go first because a file may have been replaced by a folder of the same name.
+        for (path, _) in self.files.iter().filter(|(_, s)| **s == State::Deleted) {
+            match fs::remove_file(dest.join(path)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        for (path, _) in self.files.iter().filter(|(_, s)| **s != State::Deleted) {
+            let source = self.blog_root.join(path);
+            let target = dest.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)?;
+            if is_post_source(path) {
+                let markdown = fs::read_to_string(&source)?;
+                update_blog_post_from_markdown_path(
+                    path.clone(),
+                    &markdown,
+                    now,
+                    frontmatter_delimiter,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_post_source(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "md") && !crate::path_is_not_a_post(path)
+}
+
+/// Whether an uncommitted change belongs on the site. Tracked files are published anyway, but a new
+/// file only counts in a place the build reads from: elsewhere it could be anything.
+fn uncommitted_change_is_relevant(path: &Path, state: &State) -> bool {
+    if crate::path_is_ignored(path, false) {
+        return false;
+    }
+    *state != State::Created
+        || changes_every_page(path)
+        || is_post_source(path)
+        || path.starts_with("media")
+}
+
+/// Repository-relative paths that differ between `HEAD`, the index and the working tree, leaving
+/// out ignored files.
+fn uncommitted_paths(
+    repo: &gix::Repository,
+) -> Result<BTreeSet<PathBuf>, Box<dyn std::error::Error>> {
+    let status = repo
+        .status(progress::Discard)?
+        .index_worktree_submodules(None::<Submodule>)
+        .tree_index_track_renames(TrackRenames::Disabled)
+        .untracked_files(UntrackedFiles::Files)
+        .into_iter(None)?;
+    let mut paths = BTreeSet::new();
+    for item in status {
+        let item = item?;
+        // Items without a summary only report index bookkeeping, not a change.
+        if matches!(&item, StatusItem::IndexWorktree(change) if change.summary().is_none()) {
+            continue;
+        }
+        paths.insert(PathBuf::from(item.location().to_str_lossy().as_ref()));
+    }
+    Ok(paths)
 }
 
 thread_local! {
@@ -120,7 +223,7 @@ pub fn all_blog_posts() -> Vec<BlogPost> {
     blog_post::all()
 }
 
-/// Apply one commit's tree diff to the blog post store (newest-first walk).
+/// Apply one commit's tree diff to the blog post store. Commits must be applied oldest first.
 pub fn apply_tree_diff_to_blog_posts(
     diff: &HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
     commit_dt: DateTime<FixedOffset>,
@@ -201,7 +304,7 @@ pub fn apply_tree_diff_to_blog_posts(
         if handled_deleted.contains(del_path) {
             continue;
         }
-        if crate::path_is_ignored(del_path, false) {
+        if crate::path_is_not_a_post(del_path) {
             continue;
         }
         if !del_path.extension().is_some_and(|e| e == "md") {
@@ -213,7 +316,7 @@ pub fn apply_tree_diff_to_blog_posts(
     }
 
     for (path, oid) in &created {
-        if handled_created.contains(path) || crate::path_is_ignored(path, false) {
+        if handled_created.contains(path) || crate::path_is_not_a_post(path) {
             continue;
         }
         if !path.extension().is_some_and(|e| e == "md") {
@@ -247,7 +350,7 @@ pub fn apply_tree_diff_to_blog_posts(
     }
 
     for (path, oid) in &modified {
-        if crate::path_is_ignored(path, false) {
+        if crate::path_is_not_a_post(path) {
             continue;
         }
         if !path.extension().is_some_and(|e| e == "md") {
@@ -272,6 +375,7 @@ fn walk_commits_newest_first(
 ) -> Vec<(gix::ObjectId, DateTime<FixedOffset>)> {
     let walk = repo
         .rev_walk([head_id])
+        .first_parent_only()
         .sorting(Sorting::ByCommitTime(Default::default()))
         .all()
         .expect("rev_walk iterator");
@@ -293,20 +397,155 @@ fn walk_commits_newest_first(
 fn apply_commit_history_to_blog_posts(
     repo: &gix::Repository,
     commit_infos: &[(gix::ObjectId, DateTime<FixedOffset>)],
-    tree_diff_fn: impl Fn(&Tree, &Tree) -> HashMap<PathBuf, (State, Option<gix::ObjectId>)>,
+    up_to: Option<&DateTime<FixedOffset>>,
+    subdir: Option<&Path>,
 ) {
-    for i in 0..commit_infos.len() {
-        let (tree_oid, commit_dt) = &commit_infos[i];
-        let current_tree = load_tree(repo, *tree_oid).expect("load tree");
-        let parent_tree = if i + 1 < commit_infos.len() {
-            Some(load_tree(repo, commit_infos[i + 1].0).expect("load parent tree"))
-        } else {
-            None
-        };
-        let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
-        let diff = tree_diff_fn(&from, &current_tree);
+    let mut visited = HashSet::new();
+    for (tree_oid, _) in commit_infos {
+        cache_tree_recursively(repo, *tree_oid, &mut visited);
+    }
+    replay_commit_history(commit_infos, up_to, subdir);
+}
+
+/// Replays `commit_infos` (newest first, as `(root tree, commit time)`) onto the blog post store,
+/// oldest commit first, so later commits win. The trees must already be in [`TREE_CACHE`].
+///
+/// When the oldest commit is at or before `up_to` it only serves as the base of the next diff.
+fn replay_commit_history(
+    commit_infos: &[(gix::ObjectId, DateTime<FixedOffset>)],
+    up_to: Option<&DateTime<FixedOffset>>,
+    subdir: Option<&Path>,
+) {
+    for (i, (tree_oid, commit_dt)) in commit_infos.iter().enumerate().rev() {
+        let parent = commit_infos.get(i + 1);
+        if parent.is_none() && up_to.is_some_and(|cutoff| commit_dt <= cutoff) {
+            continue;
+        }
+        let from = parent.map_or_else(empty_tree, |(oid, _)| scoped_tree(oid, subdir));
+        let diff = tree_diff(&from, &scoped_tree(tree_oid, subdir));
         apply_tree_diff_to_blog_posts(&diff, *commit_dt);
     }
+}
+
+fn empty_tree() -> Tree {
+    Tree { entries: vec![] }
+}
+
+/// Follows `subdir` down from the `root` tree; `None` when a component does not exist.
+fn resolve_subdir(
+    root: gix::ObjectId,
+    subdir: Option<&Path>,
+    load: &impl Fn(&gix::ObjectId) -> Option<Tree>,
+) -> Option<gix::ObjectId> {
+    let Some(subdir) = subdir else {
+        return Some(root);
+    };
+    let mut current = root;
+    for component in subdir.iter() {
+        let name = component.to_string_lossy();
+        let tree = load(&current)?;
+        current = tree
+            .entries
+            .iter()
+            .find(|e| e.mode.is_tree() && e.filename.as_slice() == name.as_bytes())?
+            .oid;
+    }
+    Some(current)
+}
+
+/// The blog's tree within the cached root tree `root`; empty when the folder does not exist there.
+fn scoped_tree(root: &gix::ObjectId, subdir: Option<&Path>) -> Tree {
+    resolve_subdir(*root, subdir, &cached_tree)
+        .and_then(|oid| cached_tree(&oid))
+        .unwrap_or_else(empty_tree)
+}
+
+fn subdir_not_found(subdir: Option<&Path>) -> String {
+    let name = subdir.map(|p| p.display().to_string()).unwrap_or_default();
+    format!("folder `{name}` not found in the repository")
+}
+
+fn cache_tree_recursively(
+    repo: &gix::Repository,
+    tree_oid: gix::ObjectId,
+    visited: &mut HashSet<gix::ObjectId>,
+) {
+    if !visited.insert(tree_oid) {
+        return;
+    }
+    let tree = load_tree(repo, tree_oid).expect("load tree");
+    for entry in tree.entries.iter().filter(|e| e.mode.is_tree()) {
+        cache_tree_recursively(repo, entry.oid, visited);
+    }
+}
+
+fn author_display_name(name: &BStr) -> Option<String> {
+    let name = name.to_str_lossy().trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether a change to the source file at `path` affects every generated page.
+#[must_use]
+pub fn changes_every_page(path: &Path) -> bool {
+    let parts: Vec<_> = path.iter().filter_map(|part| part.to_str()).collect();
+    matches!(
+        parts.as_slice(),
+        ["templates", _] | ["css", "layout.css" | "theme.css"]
+    )
+}
+
+/// Files of `head_tree` that rendering needs even when they did not change since the last build.
+#[must_use]
+pub fn blobs_needed_for_rendering(head_tree: &Tree) -> Vec<FileBlob> {
+    let mut blobs = Vec::new();
+    for dir in head_tree.entries.iter().filter(|e| e.mode.is_tree()) {
+        let Some(tree) = cached_tree(&dir.oid) else {
+            continue;
+        };
+        let dir_name = PathBuf::from(dir.filename.to_str_lossy().as_ref());
+        for entry in tree.entries.iter().filter(|e| !e.mode.is_tree()) {
+            let file_path = dir_name.join(entry.filename.to_str_lossy().as_ref());
+            if changes_every_page(&file_path) || file_path == Path::new("media/avatar") {
+                blobs.push(FileBlob {
+                    file_path,
+                    oid: entry.oid,
+                });
+            }
+        }
+    }
+    blobs
+}
+
+/// Creates or refreshes a bare clone of `url` at `clone_dir`, with the remote's branches mirrored
+/// under `refs/heads/` so it can be read like any local repository.
+pub fn sync_clone(url: &Url, clone_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let interrupt = AtomicBool::new(false);
+    if clone_dir.join("HEAD").is_file() {
+        let repo = gix::open(clone_dir)?;
+        repo.find_remote("origin")?
+            .connect(Direction::Fetch)?
+            .prepare_fetch(progress::Discard, Default::default())?
+            .receive(progress::Discard, &interrupt)?;
+    } else {
+        fs::create_dir_all(clone_dir)?;
+        gix::prepare_clone_bare(url.clone(), clone_dir)?
+            .configure_remote(|remote| {
+                Ok(remote.with_refspecs(Some("+refs/heads/*:refs/heads/*"), Direction::Fetch)?)
+            })
+            .fetch_only(progress::Discard, &interrupt)?;
+    }
+    Ok(())
+}
+
+fn connect_to_remote(url: &Url) -> Result<Box<dyn Transport + Send>, client::connect::Error> {
+    gix::protocol::transport::connect(
+        url.clone(),
+        client::connect::Options {
+            version: gix::protocol::transport::Protocol::default(),
+            trace: true,
+            ssh: Default::default(),
+        },
+    )
 }
 
 fn branch_commit_id(
@@ -394,63 +633,6 @@ fn temp_dest_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     )))
 }
 
-/// Copy blog-relevant files from a worktree into `destination` or a fresh temp directory.
-pub fn materialize_worktree_copy(
-    repo: &gix::Repository,
-    destination: Option<PathBuf>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let dest = match destination {
-        Some(path) => path,
-        None => temp_dest_dir()?,
-    };
-    fs::create_dir_all(&dest)?;
-
-    let source_base = repo
-        .worktree()
-        .map(|wt| wt.base().to_path_buf())
-        .unwrap_or_else(|| repo.path().to_path_buf());
-
-    copy_worktree_files(&source_base, &source_base, &dest)?;
-    Ok(dest)
-}
-
-fn worktree_copy_is_skipped(rel: &Path, is_dir: bool) -> bool {
-    if rel
-        .components()
-        .next()
-        .is_some_and(|c| c.as_os_str() == ".git")
-    {
-        return true;
-    }
-    crate::path_is_ignored(rel, is_dir)
-}
-
-fn copy_worktree_files(
-    root: &Path,
-    current: &Path,
-    dest: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(root)?;
-        if worktree_copy_is_skipped(rel, path.is_dir()) {
-            continue;
-        }
-        let out = dest.join(rel);
-        if path.is_dir() {
-            fs::create_dir_all(&out)?;
-            copy_worktree_files(root, &path, dest)?;
-        } else {
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&path, &out)?;
-        }
-    }
-    Ok(())
-}
-
 /// Write every file under `tree_oid` (recursive) into `dest_root`, using objects from a decoded pack.
 fn write_tree_from_pack_store(
     store: &HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>,
@@ -496,6 +678,7 @@ fn checkout_commit_into_dest(
     store: &HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>,
     dest: &Path,
     commit_oid: gix::ObjectId,
+    subdir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (kind, data) = store
         .get(&commit_oid)
@@ -504,8 +687,20 @@ fn checkout_commit_into_dest(
         return Err(format!("expected commit object, got {:?}", kind).into());
     }
     let commit = CommitRef::from_bytes(data.as_slice())?;
-    let tree_oid = commit.tree();
+    let load = |oid: &gix::ObjectId| {
+        let (_, data) = store.get(oid)?;
+        Some(Tree::from(TreeRef::from_bytes(data.as_slice()).ok()?))
+    };
+    let tree_oid =
+        resolve_subdir(commit.tree(), subdir, &load).ok_or_else(|| subdir_not_found(subdir))?;
     write_tree_from_pack_store(store, dest, &tree_oid, Path::new(""))
+}
+
+struct FetchedCommit {
+    tree: gix::ObjectId,
+    time: DateTime<FixedOffset>,
+    first_parent: Option<gix::ObjectId>,
+    author: Option<String>,
 }
 
 impl GitRemote {
@@ -528,11 +723,7 @@ impl GitRemote {
 
         let mut tip_commit_oid: Option<gix::ObjectId> = None;
 
-        let mut transport = http::connect(
-            self.url.clone(),
-            gix::protocol::transport::Protocol::default(),
-            true,
-        );
+        let mut transport = connect_to_remote(&self.url)?;
 
         let outcome = gix::protocol::handshake(
             &mut transport,
@@ -660,7 +851,7 @@ impl GitRemote {
         if blobs.is_empty() {
             let tip = tip_commit_oid.ok_or("branch tip OID missing for full checkout")?;
             let store = decoded_objects.borrow();
-            checkout_commit_into_dest(&store, &dest, tip)?;
+            checkout_commit_into_dest(&store, &dest, tip, self.subdir.as_deref())?;
         } else {
             for oid in requested.keys() {
                 if !written.contains_key(oid) {
@@ -672,14 +863,11 @@ impl GitRemote {
         Ok(dest)
     }
 
-    /// Fetch changes since the given date and time.
+    /// Fetch the branch's commits and trees (no file contents) since `up_to`, or its whole history
+    /// when `up_to` is `None`, and replay them onto the blog post store.
     /// Return the Tree objects corresponding to the up_to and head commits.
-    pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
-        let mut transport = http::connect(
-            self.url.clone(),
-            gix::protocol::transport::Protocol::default(),
-            true,
-        );
+    pub fn fetch_since(&self, up_to: Option<&DateTime<FixedOffset>>) -> TreeEnds {
+        let mut transport = connect_to_remote(&self.url).expect("connect to remote");
 
         // Capture handshake outcome: we need server_protocol_version and capabilities
         // to pass real server features to fetch::Arguments::new later.
@@ -728,20 +916,17 @@ impl GitRemote {
             fetch::Arguments::new(outcome.server_protocol_version, fetch_features, false);
 
         args.want(head_oid);
-        // Limit history depth so we don't download the full repository.
-        // Use deepen-since when up_to is a real (positive) Unix timestamp so that
-        // only commits newer than the last known update are included.
-        // Fall back to deepen(1) for the MIN_UTC sentinel (no blog_url given) –
-        // its timestamp is ≈ -8.3e12, which GitHub rejects as invalid.
-        let ts = up_to.timestamp();
-        if args.can_use_deepen_since() {
-            args.deepen_since(ts);
-            // Skip all blob objects to reduce pack size.
-            if args.can_use_filter() {
-                args.filter("blob:none");
+        // Only commits newer than the last known update are needed for incremental builds.
+        if let Some(cutoff) = up_to {
+            if args.can_use_deepen_since() {
+                args.deepen_since(cutoff.timestamp());
+            } else if args.can_use_shallow() {
+                args.deepen(1);
             }
-        } else if args.can_use_shallow() {
-            args.deepen(1);
+        }
+        // Dates only need commits and trees: skip all blob objects to reduce pack size.
+        if args.can_use_filter() {
+            args.filter("blob:none");
         }
 
         // Set add_done_argument so no negotiation rounds needed.
@@ -765,11 +950,6 @@ impl GitRemote {
         // stripping the channel byte and forwarding progress/error messages.
         reader.set_progress_handler(Some(Box::new(|_is_err, _text| ProgressAction::Continue)));
 
-        let mut head_tree_id: Option<gix::ObjectId> = None;
-        let mut up_to_tree_id: Option<gix::ObjectId> = None;
-        let mut head_tree: Option<gix::objs::Tree> = None;
-        let mut up_to_tree: Option<gix::objs::Tree> = None;
-
         // Persist pack bytes and decode objects via gix_pack::data::File::decode_entry(),
         // which resolves OfsDelta/RefDelta chains and yields restored object bytes.
         let mut pack_tmp = NamedTempFile::new().expect("create temp pack");
@@ -787,8 +967,7 @@ impl GitRemote {
         let decoded_objects: RefCell<HashMap<gix::ObjectId, (gix::objs::Kind, Vec<u8>)>> =
             RefCell::new(HashMap::new());
 
-        let mut commits_count: i32 = 0;
-        let mut commit_infos: Vec<(gix::ObjectId, DateTime<FixedOffset>)> = Vec::new();
+        let mut commits: HashMap<gix::ObjectId, FetchedCommit> = HashMap::new();
 
         for _ in 0..pack.num_objects() {
             let entry = pack.entry(offset).expect("read pack entry at offset");
@@ -822,31 +1001,25 @@ impl GitRemote {
 
             if matches!(kind, gix::objs::Kind::Commit) {
                 let commit = CommitRef::from_bytes(out.as_slice()).expect("parse commit");
-                let commit_tree_id = commit.tree();
                 let time = commit.committer.time;
                 let offset = FixedOffset::east_opt(time.offset)
                     .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
                 let dt = DateTime::from_timestamp(time.seconds, 0)
                     .expect("valid commit timestamp")
                     .with_timezone(&offset);
-                commit_infos.push((commit_tree_id, dt));
-                if head_tree_id.is_none() {
-                    head_tree_id = Some(commit_tree_id);
-                }
-                up_to_tree_id = Some(commit_tree_id);
-                commits_count += 1;
+                commits.insert(
+                    oid,
+                    FetchedCommit {
+                        tree: commit.tree(),
+                        time: dt,
+                        first_parent: commit.parents().next(),
+                        author: author_display_name(commit.author.name),
+                    },
+                );
             } else if matches!(kind, gix::objs::Kind::Tree) {
                 let tree_ref = TreeRef::from_bytes(out.as_slice()).expect("parse tree");
                 let tree = Tree::from(tree_ref);
-                TREE_CACHE.with(|cache| {
-                    cache.borrow_mut().insert(oid, tree.clone());
-                });
-                if Some(oid) == head_tree_id {
-                    head_tree = Some(tree.clone());
-                }
-                if Some(oid) == up_to_tree_id {
-                    up_to_tree = Some(tree);
-                }
+                cache_tree_oid(oid, tree);
             }
 
             // Move to the next entry by consuming exactly this entry from the pack.
@@ -857,26 +1030,25 @@ impl GitRemote {
             offset = entry.pack_offset() + entry.header_size() as u64 + consumed as u64;
         }
 
-        println!("Fetched {} commits", commits_count);
-
-        for i in 0..commit_infos.len() {
-            let (tree_oid, commit_dt) = &commit_infos[i];
-            let Some(current_tree) = cached_tree(tree_oid) else {
-                continue;
-            };
-            let parent_tree = if i + 1 < commit_infos.len() {
-                cached_tree(&commit_infos[i + 1].0)
-            } else {
-                None
-            };
-            let from = parent_tree.unwrap_or_else(|| Tree { entries: vec![] });
-            let diff = self.tree_diff(&from, &current_tree);
-            apply_tree_diff_to_blog_posts(&diff, *commit_dt);
+        // Newest first along the first-parent chain; it stops at the shallow boundary.
+        let mut commit_infos: Vec<(gix::ObjectId, DateTime<FixedOffset>)> = Vec::new();
+        let mut next = Some(head_oid);
+        while let Some(commit) = next.and_then(|oid| commits.get(&oid)) {
+            commit_infos.push((commit.tree, commit.time));
+            next = commit.first_parent;
         }
+        println!("Fetched {} commits", commit_infos.len());
 
+        let subdir = self.subdir.as_deref();
+        replay_commit_history(&commit_infos, up_to, subdir);
+
+        let tree_at = |info: Option<&(gix::ObjectId, DateTime<FixedOffset>)>| {
+            info.map_or_else(empty_tree, |(oid, _)| scoped_tree(oid, subdir))
+        };
         TreeEnds {
-            up_to_tree: up_to_tree.expect("up_to tree object was not found in pack"),
-            head_tree: head_tree.expect("head tree object was not found in pack"),
+            up_to_tree: tree_at(commit_infos.last()),
+            head_tree: tree_at(commit_infos.first()),
+            head_author: commits.get(&head_oid).and_then(|c| c.author.clone()),
         }
     }
 
@@ -893,6 +1065,70 @@ impl GitRemote {
 impl GitLocal {
     fn open(&self) -> Result<gix::Repository, Box<dyn std::error::Error>> {
         Ok(gix::discover(&self.repo_root)?)
+    }
+
+    /// The commit to build: the tip of the requested branch, else `HEAD`.
+    fn tip_commit_id(
+        &self,
+        repo: &gix::Repository,
+    ) -> Result<gix::ObjectId, Box<dyn std::error::Error>> {
+        match &self.branch {
+            Some(branch) => branch_commit_id(repo, branch),
+            None => Ok(repo.head_id().map_err(|e| format!("HEAD: {e}"))?.detach()),
+        }
+    }
+
+    /// Whether the checked-out files are a working copy of the commit being built.
+    fn working_tree_matches_build(&self, repo: &gix::Repository) -> bool {
+        self.branch.as_ref().is_none_or(|branch| {
+            let expected = format!("refs/heads/{branch}");
+            repo.head_name()
+                .ok()
+                .flatten()
+                .is_some_and(|head| head.as_bstr() == expected.as_bytes())
+        })
+    }
+
+    /// What the working tree adds to the commit being built. Nothing for a bare repository, or
+    /// when another branch than the one being built is checked out.
+    pub fn uncommitted_changes(&self) -> Result<UncommittedChanges, Box<dyn std::error::Error>> {
+        let repo = self.open()?;
+        let Some(worktree) = repo.worktree() else {
+            return Ok(UncommittedChanges::default());
+        };
+        if !self.working_tree_matches_build(&repo) {
+            println!("Ignoring uncommitted changes: the branch to build is not checked out");
+            return Ok(UncommittedChanges::default());
+        }
+        let root = worktree.base().to_path_buf();
+        let head_tree = repo.head_tree().map_err(|e| format!("HEAD tree: {e}"))?;
+        let subdir = self.subdir.as_deref().unwrap_or(Path::new(""));
+
+        let mut files = BTreeMap::new();
+        for repo_path in uncommitted_paths(&repo)? {
+            let Ok(path) = repo_path.strip_prefix(subdir) else {
+                continue;
+            };
+            let on_disk = root.join(&repo_path);
+            let state = if on_disk.is_file() {
+                if head_tree.lookup_entry_by_path(&repo_path)?.is_some() {
+                    State::Modified
+                } else {
+                    State::Created
+                }
+            } else if on_disk.symlink_metadata().is_err() {
+                State::Deleted
+            } else {
+                continue;
+            };
+            if uncommitted_change_is_relevant(path, &state) {
+                files.insert(path.to_path_buf(), state);
+            }
+        }
+        Ok(UncommittedChanges {
+            blog_root: root.join(subdir),
+            files,
+        })
     }
 
     pub fn tree_diff(
@@ -916,12 +1152,16 @@ impl GitLocal {
         fs::create_dir_all(&dest)?;
 
         if blobs.is_empty() {
-            let head_id = branch_commit_id(&repo, &self.branch)?;
+            let head_id = self.tip_commit_id(&repo)?;
             let commit = repo
                 .find_object(head_id)
                 .map_err(|e| format!("find commit {head_id}: {e}"))?;
             let commit = commit.into_commit();
-            let tree_id = commit.tree_id()?.detach();
+            let root_id = commit.tree_id()?.detach();
+            let load = |oid: &gix::ObjectId| load_tree(&repo, *oid).ok();
+            let subdir = self.subdir.as_deref();
+            let tree_id =
+                resolve_subdir(root_id, subdir, &load).ok_or_else(|| subdir_not_found(subdir))?;
             write_tree_from_repo(&repo, &dest, tree_id, Path::new(""))?;
         } else {
             for blob in blobs {
@@ -939,46 +1179,51 @@ impl GitLocal {
         Ok(dest)
     }
 
-    /// Walk the full branch history and set publication dates from git events.
+    /// Walk the full branch history and set post dates from git events.
     pub fn index_publication_dates(&self) {
         let repo = self.open().expect("discover local repo");
-        let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
+        let head_id = self.tip_commit_id(&repo).expect("revision to build");
         let commit_infos = walk_commits_newest_first(&repo, head_id, None);
         println!(
             "Indexed publication dates from {} commits",
             commit_infos.len()
         );
-        apply_commit_history_to_blog_posts(&repo, &commit_infos, tree_diff);
+        apply_commit_history_to_blog_posts(&repo, &commit_infos, None, self.subdir.as_deref());
+    }
+
+    /// Author name of the commit being built.
+    #[must_use]
+    pub fn head_author(&self) -> Option<String> {
+        let repo = self.open().ok()?;
+        let head_id = self.tip_commit_id(&repo).ok()?;
+        let commit = repo.find_object(head_id).ok()?.try_into_commit().ok()?;
+        let author = commit.author().ok()?;
+        author_display_name(author.name)
     }
 
     pub fn fetch_since(&self, up_to: &DateTime<FixedOffset>) -> TreeEnds {
         let repo = self.open().expect("discover local repo");
-        let head_id = branch_commit_id(&repo, &self.branch).expect("branch ref");
+        let head_id = self.tip_commit_id(&repo).expect("revision to build");
         let commit_infos = walk_commits_newest_first(&repo, head_id, Some(up_to));
 
         println!("Fetched {} commits", commit_infos.len());
 
-        apply_commit_history_to_blog_posts(&repo, &commit_infos, tree_diff);
+        let subdir = self.subdir.as_deref();
+        apply_commit_history_to_blog_posts(&repo, &commit_infos, Some(up_to), subdir);
 
         let head_tree = commit_infos
             .first()
-            .map(|(oid, _)| load_tree(&repo, *oid).expect("head tree"))
-            .unwrap_or_else(|| Tree { entries: vec![] });
+            .map_or_else(empty_tree, |(oid, _)| scoped_tree(oid, subdir));
 
         let up_to_tree = commit_infos
             .last()
-            .and_then(|(oid, dt)| {
-                if *dt <= *up_to {
-                    load_tree(&repo, *oid).ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| Tree { entries: vec![] });
+            .filter(|(_, dt)| *dt <= *up_to)
+            .map_or_else(empty_tree, |(oid, _)| scoped_tree(oid, subdir));
 
         TreeEnds {
             up_to_tree,
             head_tree,
+            head_author: self.head_author(),
         }
     }
 }
