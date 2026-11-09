@@ -33,6 +33,7 @@ pub struct Entry {
 }
 
 impl Entry {
+    #[must_use]
     pub fn effective_published(&self) -> DateTime<FixedOffset> {
         self.published.unwrap_or(self.updated)
     }
@@ -53,10 +54,15 @@ pub struct Feed {
     pub entries: Vec<Entry>,
 }
 
+/// Parses an Atom document.
+///
+/// # Errors
+/// Fails when `xml` is not a valid Atom feed.
 pub fn parse(xml: &str) -> Result<Feed, quick_xml::DeError> {
     quick_xml::de::from_str(xml)
 }
 
+#[must_use]
 pub fn build_feed_from_blog_posts(
     blog_url: &str,
     posts: &[BlogPost],
@@ -95,9 +101,10 @@ pub fn build_feed_from_blog_posts(
         })
         .collect::<Vec<_>>();
 
-    let fallback_updated = previous
-        .map(|f| f.updated)
-        .unwrap_or_else(|| chrono::Utc::now().with_timezone(&Local).fixed_offset());
+    let fallback_updated = previous.map_or_else(
+        || chrono::Utc::now().with_timezone(&Local).fixed_offset(),
+        |f| f.updated,
+    );
     let updated = sorted_posts
         .iter()
         .map(|p| p.last_updated)
@@ -106,9 +113,7 @@ pub fn build_feed_from_blog_posts(
     let description = format!("The latest news from {author}");
 
     Feed {
-        id: previous
-            .map(|f| f.id.clone())
-            .unwrap_or_else(|| format!("{base_url}/atom.xml")),
+        id: previous.map_or_else(|| format!("{base_url}/atom.xml"), |f| f.id.clone()),
         title: description.clone(),
         updated,
         author: Author {
@@ -124,6 +129,13 @@ pub fn build_feed_from_blog_posts(
     }
 }
 
+/// Serializes `feed` as an Atom document.
+///
+/// # Errors
+/// Fails when the XML cannot be written.
+///
+/// # Panics
+/// Panics if the generated document is not valid UTF-8, which string input rules out.
 pub fn generate(feed: &Feed) -> Result<String, quick_xml::Error> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 

@@ -13,6 +13,7 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.description.is_none()
@@ -71,6 +72,7 @@ fn parse_frontmatter_date(value: &str) -> Option<DateTime<FixedOffset>> {
     })
 }
 
+#[must_use]
 pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, String) {
     let lines: Vec<&str> = markdown.lines().collect();
     let mut title = fallback.to_string();
@@ -87,52 +89,56 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
         }
     }
 
-    let Some(mut idx) = title_idx.map(|i| i + 1) else {
+    let Some(start) = title_idx.map(|i| i + 1) else {
         return (title, String::new());
     };
 
-    while idx < lines.len() && lines[idx].trim().is_empty() {
-        idx += 1;
-    }
-
-    let mut quote_lines = Vec::new();
-    while idx < lines.len() {
-        let trimmed = lines[idx].trim();
-        if let Some(rest) = trimmed.strip_prefix('>') {
-            let content = rest.strip_prefix(' ').unwrap_or(rest).to_string();
-            quote_lines.push(content);
-            idx += 1;
-            continue;
-        }
-        break;
-    }
+    let quote_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .skip(start)
+        .skip_while(|line| line.trim().is_empty())
+        .map_while(blockquote_text)
+        .collect();
 
     (title, quote_lines.join("\n"))
 }
 
+/// Text of a blockquote line, without its `>` marker; `None` for any other line.
+fn blockquote_text(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix('>')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
+/// Index and text of the first non-blank line at or after `from`.
+fn first_non_blank<'a>(lines: &[&'a str], from: usize) -> Option<(usize, &'a str)> {
+    lines
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(from)
+        .find(|(_, line)| !line.trim().is_empty())
+}
+
 /// YAML / metadata block without delimiters, paired with markdown body after the closing delimiter.
 fn split_frontmatter_raw(markdown: &str, delimiter: &str) -> (String, String) {
+    let no_frontmatter = || (String::new(), markdown.to_string());
     let d = delimiter.trim();
     if d.is_empty() {
-        return (String::new(), markdown.to_string());
+        return no_frontmatter();
     }
     let lines: Vec<&str> = markdown.lines().collect();
-    if lines.is_empty() || lines[0].trim() != d {
-        return (String::new(), markdown.to_string());
-    }
-    let mut close_idx = None;
-    for i in 1..lines.len() {
-        if lines[i].trim() == d {
-            close_idx = Some(i);
-            break;
-        }
-    }
-    let Some(close) = close_idx else {
-        return (String::new(), markdown.to_string());
+    let Some((first, after_open)) = lines.split_first() else {
+        return no_frontmatter();
     };
-    let fm_inner = lines[1..close].join("\n");
-    let rest = lines[close + 1..].join("\n");
-    (fm_inner, rest)
+    if first.trim() != d {
+        return no_frontmatter();
+    }
+    let mut parts = after_open.splitn(2, |line| line.trim() == d);
+    match (parts.next(), parts.next()) {
+        (Some(inner), Some(rest)) => (inner.join("\n"), rest.join("\n")),
+        _ => no_frontmatter(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,50 +177,36 @@ fn parse_body_intro(
     lines: &[&str],
     fallback_title: &str,
 ) -> (String, Option<usize>, BodySummaryKind) {
-    let mut i = 0usize;
-    while i < lines.len() && lines[i].trim().is_empty() {
-        i += 1;
-    }
-    if i >= lines.len() {
+    let Some((first, first_line)) = first_non_blank(lines, 0) else {
         return (fallback_title.to_string(), None, BodySummaryKind::None);
-    }
+    };
 
-    let trimmed = lines[i].trim();
     let mut h1_idx = None;
     let mut body_title = fallback_title.to_string();
-    if let Some(rest) = trimmed.strip_prefix("# ") {
+    let mut after_title = first;
+    if let Some(rest) = first_line.trim().strip_prefix("# ") {
         if !rest.starts_with('#') {
             body_title = rest.trim().to_string();
-            h1_idx = Some(i);
-            i += 1;
+            h1_idx = Some(first);
+            after_title = first + 1;
         }
     }
 
-    while i < lines.len() && lines[i].trim().is_empty() {
-        i += 1;
-    }
-
-    if i >= lines.len() {
+    let Some((start, intro_line)) = first_non_blank(lines, after_title) else {
         return (body_title, h1_idx, BodySummaryKind::None);
-    }
+    };
 
-    if lines[i].trim_start().starts_with('>') {
-        let start = i;
-        let mut dequoted = Vec::new();
-        while i < lines.len() {
-            let t = lines[i].trim();
-            if let Some(rest) = t.strip_prefix('>') {
-                let content = rest.strip_prefix(' ').unwrap_or(rest);
-                dequoted.push(content.to_string());
-                i += 1;
-            } else {
-                break;
-            }
-        }
+    if intro_line.trim_start().starts_with('>') {
+        let dequoted: Vec<&str> = lines
+            .iter()
+            .copied()
+            .skip(start)
+            .map_while(blockquote_text)
+            .collect();
         if dequoted.is_empty() {
             return (body_title, h1_idx, BodySummaryKind::None);
         }
-        let end = i - 1;
+        let end = start + dequoted.len() - 1;
         let markdown = dequoted.join("\n");
         return (
             body_title,
@@ -228,17 +220,17 @@ fn parse_body_intro(
     }
 
     // First paragraph run (until blank line).
-    let start = i;
-    let mut para = Vec::new();
-    while i < lines.len() && !lines[i].trim().is_empty() {
-        para.push(lines[i]);
-        i += 1;
-    }
+    let para: Vec<&str> = lines
+        .iter()
+        .copied()
+        .skip(start)
+        .take_while(|line| !line.trim().is_empty())
+        .collect();
     let joined = para.join("\n");
     if joined.is_empty() || !line_looks_like_tldr_lede(&joined) {
         return (body_title, h1_idx, BodySummaryKind::None);
     }
-    let end = i - 1;
+    let end = start + para.len() - 1;
     (
         body_title,
         h1_idx,
@@ -288,6 +280,7 @@ fn build_body_markdown_after_strip(
 /// Parses front matter and body intro, then returns metadata plus markdown for the article body
 /// without the displayed title and lede (blockquote summary, TL;DR paragraph, or nothing when
 /// description comes only from front matter).
+#[must_use]
 pub fn article_render_parts(
     markdown: &str,
     fallback_title: &str,
@@ -330,6 +323,7 @@ pub fn article_render_parts(
     }
 }
 
+#[must_use]
 pub fn parse_content_metadata(
     markdown: &str,
     fallback_title: &str,
@@ -350,11 +344,13 @@ pub fn parse_content_metadata(
 }
 
 /// Renders a short markdown fragment (no front matter) to HTML.
+#[must_use]
 pub fn render_markdown_fragment_to_html(markdown: &str) -> String {
     render_markdown_to_html(markdown, "")
 }
 
 /// If `html` is a single top-level `<p>…</p>` from comrak, returns the inner HTML for embedding.
+#[must_use]
 pub fn unwrap_single_paragraph_html(html: &str) -> String {
     let t = html.trim();
     let Some(rest) = t.strip_prefix("<p>") else {
@@ -370,6 +366,7 @@ pub fn unwrap_single_paragraph_html(html: &str) -> String {
 }
 
 /// Plain text suitable for `<meta name="description">` and Atom summaries.
+#[must_use]
 pub fn markdown_fragment_to_plain_text(markdown: &str) -> String {
     if markdown.trim().is_empty() {
         return String::new();
@@ -392,6 +389,7 @@ pub(crate) fn strip_html_tags_collapse_ws(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[must_use]
 pub fn article_description_html_fragment(summary_markdown: &str) -> Option<String> {
     let t = summary_markdown.trim();
     if t.is_empty() {
@@ -402,6 +400,7 @@ pub fn article_description_html_fragment(summary_markdown: &str) -> Option<Strin
     if inner.is_empty() { None } else { Some(inner) }
 }
 
+#[must_use]
 pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> String {
     let mut options = comrak::Options::default();
     options.extension.footnotes = true;
@@ -409,7 +408,7 @@ pub fn render_markdown_to_html(markdown: &str, frontmatter_delimiter: &str) -> S
     options.extension.table = true;
     options.extension.tasklist = true;
 
-    options.extension.header_id_prefix = Some("".to_string());
+    options.extension.header_id_prefix = Some(String::new());
     options.extension.autolink = true;
 
     options.extension.math_dollars = true;

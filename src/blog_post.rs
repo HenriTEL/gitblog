@@ -43,6 +43,7 @@ thread_local! {
 }
 
 impl BlogPost {
+    #[must_use]
     pub fn new(
         path: PathBuf,
         last_updated: DateTime<FixedOffset>,
@@ -61,6 +62,7 @@ impl BlogPost {
         }
     }
 
+    #[must_use]
     pub fn with_defaults(path: PathBuf, last_updated: DateTime<FixedOffset>) -> Self {
         let section = section_from_path(&path);
         Self {
@@ -74,6 +76,7 @@ impl BlogPost {
         }
     }
 
+    #[must_use]
     pub fn effective_publication_date(&self) -> DateTime<FixedOffset> {
         self.publication_date.unwrap_or(self.last_updated)
     }
@@ -85,13 +88,14 @@ impl BlogPost {
         last_updated: DateTime<FixedOffset>,
         path: PathBuf,
     ) {
-        self.path = path.clone();
         self.section = section_from_path(&path);
+        self.path = path;
         self.last_updated = last_updated;
         self.title = title;
         self.summary = summary;
     }
 
+    #[must_use]
     pub fn from_source(
         path: PathBuf,
         title: String,
@@ -158,6 +162,7 @@ pub fn section_from_path(path: &Path) -> Option<String> {
 }
 
 /// Sorted, deduplicated section names from `posts`.
+#[must_use]
 pub fn collect_sections(posts: &[BlogPost]) -> Vec<String> {
     let mut sections: Vec<String> = posts.iter().filter_map(|p| p.section.clone()).collect();
     sections.sort();
@@ -165,6 +170,7 @@ pub fn collect_sections(posts: &[BlogPost]) -> Vec<String> {
     sections
 }
 
+#[must_use]
 pub fn is_draft_md(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -172,12 +178,14 @@ pub fn is_draft_md(path: &Path) -> bool {
 }
 
 /// `post.draft.md` → `post.md`
+#[must_use]
 pub fn published_path_from_draft(draft: &Path) -> Option<PathBuf> {
     let name = draft.file_name()?.to_str()?;
     let published = name.strip_suffix(".draft.md")?;
     Some(draft.with_file_name(format!("{published}.md")))
 }
 
+#[must_use]
 pub fn fallback_title(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -208,7 +216,7 @@ impl BlogPostStore {
         }
     }
 
-    fn upsert_post(&mut self, mut post: BlogPost) -> BlogPost {
+    fn upsert_post(&mut self, mut post: BlogPost) {
         post.section = section_from_path(&post.path);
         if let Some(store_id) = self.post_id_for(post.object_id, &post.path) {
             let previous = self
@@ -223,19 +231,18 @@ impl BlogPostStore {
             if merged.publication_date.is_none() {
                 merged.publication_date = previous.publication_date;
             }
-            self.posts.insert(store_id, merged.clone());
             self.reindex(store_id, &previous, &merged);
-            return merged;
+            self.posts.insert(store_id, merged);
+            return;
         }
 
         let store_id = self.next_store_id;
         self.next_store_id += 1;
-        self.posts.insert(store_id, post.clone());
         self.by_path.insert(post.path.clone(), store_id);
         if let Some(oid) = post.object_id {
             self.by_object_id.insert(oid, store_id);
         }
-        post
+        self.posts.insert(store_id, post);
     }
 
     fn update_by_id(&mut self, store_id: u64, update: BlogPostUpdate) -> Option<BlogPost> {
@@ -248,34 +255,34 @@ impl BlogPostStore {
     }
 }
 
-pub fn upsert(post: BlogPost) -> BlogPost {
-    BLOG_POST_STORE.with(|store| store.borrow_mut().upsert_post(post))
+pub fn upsert(post: BlogPost) {
+    BLOG_POST_STORE.with(|store| store.borrow_mut().upsert_post(post));
 }
 
 pub fn upsert_with_defaults(
     path: PathBuf,
     object_id: Option<ObjectId>,
     last_updated: DateTime<FixedOffset>,
-) -> BlogPost {
+) {
     let mut post = BlogPost::with_defaults(path, last_updated);
     post.object_id = object_id;
-    upsert(post)
+    upsert(post);
 }
 
 pub fn register_object_path(
     object_id: ObjectId,
     path: PathBuf,
     last_updated: DateTime<FixedOffset>,
-) -> BlogPost {
+) {
     let existing = get_by_object_id(&object_id).or_else(|| get_by_path(&path));
     let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(path.clone(), last_updated));
     post.object_id = Some(object_id);
-    post.path = path.clone();
     post.section = section_from_path(&path);
+    post.path = path;
     if last_updated > post.last_updated {
         post.last_updated = last_updated;
     }
-    upsert(post)
+    upsert(post);
 }
 
 pub fn try_set_publication_date(path: &Path, date: DateTime<FixedOffset>) {
@@ -311,8 +318,8 @@ pub fn transfer_post_to_path(
 ) {
     let existing = get_by_path(from).or_else(|| get_by_object_id(&object_id));
     let mut post = existing.unwrap_or_else(|| BlogPost::with_defaults(to.clone(), last_updated));
-    post.path = to.clone();
     post.section = section_from_path(&to);
+    post.path = to;
     post.object_id = Some(object_id);
     if last_updated > post.last_updated {
         post.last_updated = last_updated;
@@ -320,6 +327,7 @@ pub fn transfer_post_to_path(
     upsert(post);
 }
 
+#[must_use]
 pub fn get_by_object_id(object_id: &ObjectId) -> Option<BlogPost> {
     BLOG_POST_STORE.with(|store| {
         let store = store.borrow();
@@ -328,6 +336,7 @@ pub fn get_by_object_id(object_id: &ObjectId) -> Option<BlogPost> {
     })
 }
 
+#[must_use]
 pub fn get_by_path(path: &Path) -> Option<BlogPost> {
     BLOG_POST_STORE.with(|store| {
         let store = store.borrow();
@@ -336,6 +345,7 @@ pub fn get_by_path(path: &Path) -> Option<BlogPost> {
     })
 }
 
+#[must_use]
 pub fn update_by_object_id(object_id: &ObjectId, update: BlogPostUpdate) -> Option<BlogPost> {
     BLOG_POST_STORE.with(|store| {
         let mut store = store.borrow_mut();
@@ -344,6 +354,7 @@ pub fn update_by_object_id(object_id: &ObjectId, update: BlogPostUpdate) -> Opti
     })
 }
 
+#[must_use]
 pub fn update_by_path(path: &Path, update: BlogPostUpdate) -> Option<BlogPost> {
     BLOG_POST_STORE.with(|store| {
         let mut store = store.borrow_mut();
@@ -352,23 +363,23 @@ pub fn update_by_path(path: &Path, update: BlogPostUpdate) -> Option<BlogPost> {
     })
 }
 
+#[must_use]
 pub fn all() -> Vec<BlogPost> {
     BLOG_POST_STORE.with(|store| store.borrow().posts.values().cloned().collect())
 }
 
-pub fn remove_by_path(path: &Path) -> bool {
+pub fn remove_by_path(path: &Path) {
     BLOG_POST_STORE.with(|store| {
         let mut store = store.borrow_mut();
         let Some(store_id) = store.by_path.remove(path) else {
-            return false;
+            return;
         };
         if let Some(post) = store.posts.remove(&store_id) {
             if let Some(oid) = post.object_id {
                 store.by_object_id.remove(&oid);
             }
         }
-        true
-    })
+    });
 }
 
 #[cfg(test)]

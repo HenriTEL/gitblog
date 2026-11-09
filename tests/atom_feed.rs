@@ -25,7 +25,7 @@ fn test_parse_example_feed() {
 
     assert_eq!(feed.entries.len(), 18);
 
-    let first = &feed.entries[0];
+    let first = feed.entries.first().expect("first entry");
     assert_eq!(first.title, "Embedded Systems Level 1");
     assert_eq!(
         first.link.href,

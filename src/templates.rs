@@ -71,6 +71,9 @@ fn tera_with_overrides(overrides: &[(String, String)]) -> Result<Tera, tera::Err
 
 /// Uses the files in the blog's `templates/` folder over the embedded templates of the same name,
 /// then removes that folder from `dest` so it is not published. Call before rendering anything.
+///
+/// # Errors
+/// Fails when a template is invalid or the folder cannot be removed.
 pub fn install_blog_templates(dest: &Path) -> Result<(), tera::Error> {
     let dir = dest.join("templates");
     let Ok(entries) = fs::read_dir(&dir) else {

@@ -38,7 +38,7 @@ fn markdown_render_supports_tables_and_tasklists() {
 
 #[test]
 fn frontmatter_overrides_title_and_summary_and_sets_date() {
-    let md = r#"---
+    let md = r"---
 title: Frontmatter Title
 description: Frontmatter Description
 date: 2026-04-24
@@ -46,7 +46,7 @@ date: 2026-04-24
 # Body Title
 
 > Body summary
-"#;
+";
     let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
     assert_eq!(title, "Frontmatter Title");
     assert_eq!(summary, "Frontmatter Description");
@@ -61,11 +61,11 @@ date: 2026-04-24
 
 #[test]
 fn frontmatter_date_parses_rfc3339() {
-    let md = r#"---
+    let md = r"---
 date: 2026-04-24T10:15:30+02:00
 ---
 Body
-"#;
+";
     let (_title, _summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
     let date = date.expect("date should be parsed");
     assert!(lastmod.is_none());
@@ -78,12 +78,12 @@ Body
 
 #[test]
 fn frontmatter_lastmod_parses_independently_of_date() {
-    let md = r#"---
+    let md = r"---
 date: 2026-01-01
 lastmod: 2026-06-15T12:00:00+02:00
 ---
 Body
-"#;
+";
     let (_title, _summary, published, lastmod) = parse_content_metadata(md, "fallback", "---");
     let published = published.expect("date");
     let lastmod = lastmod.expect("lastmod");
@@ -96,13 +96,13 @@ Body
 
 #[test]
 fn falls_back_to_markdown_when_frontmatter_missing_keys() {
-    let md = r#"---
+    let md = r"---
 author: me
 ---
 # Body Title
 
 > Body summary
-"#;
+";
     let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "---");
     assert_eq!(title, "Body Title");
     assert_eq!(summary, "Body summary");
@@ -112,14 +112,14 @@ author: me
 
 #[test]
 fn supports_custom_frontmatter_delimiter() {
-    let md = r#"+++
+    let md = r"+++
 title: Custom
 description: Uses custom delimiter
 +++
 # Body Title
 
 > Body summary
-"#;
+";
     let (title, summary, date, lastmod) = parse_content_metadata(md, "fallback", "+++");
     assert_eq!(title, "Custom");
     assert_eq!(summary, "Uses custom delimiter");
@@ -138,7 +138,7 @@ fn article_render_parts_strips_h1_and_blockquote_from_main() {
 
 #[test]
 fn article_render_parts_keeps_blockquote_in_body_when_description_is_frontmatter() {
-    let md = r#"---
+    let md = r"---
 description: From YAML
 ---
 # Body Title
@@ -146,7 +146,7 @@ description: From YAML
 > Body summary
 
 Rest
-"#;
+";
     let p = article_render_parts(md, "fallback", "---");
     assert_eq!(p.summary_markdown, "From YAML");
     assert!(p.body_markdown.contains("> Body summary"));

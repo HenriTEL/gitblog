@@ -15,13 +15,22 @@ use regex::Regex;
 pub use github::GithubUserProfile;
 
 pub trait UserProfile {
+    /// # Errors
+    /// Fails when the profile cannot be fetched or has no username.
     fn get_username(&self) -> Result<String, UserProfileError>;
 
+    /// # Errors
+    /// Fails when the profile cannot be fetched or has no bio.
     fn get_about(&self) -> Result<String, UserProfileError>;
 
     /// `(provider, url)` pairs for the social accounts listed on the profile; `provider` is lowercase.
+    ///
+    /// # Errors
+    /// Fails when the profile cannot be fetched.
     fn get_social_accounts(&self) -> Result<Vec<(String, String)>, UserProfileError>;
 
+    /// # Errors
+    /// Fails when the avatar cannot be downloaded or is not an image.
     fn fetch_avatar(&self) -> Result<AvatarData, UserProfileError>;
 }
 
@@ -58,7 +67,9 @@ impl Error for UserProfileError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             UserProfileError::Http(e) => Some(e),
-            _ => None,
+            UserProfileError::HttpStatus(_)
+            | UserProfileError::MissingMeta(_)
+            | UserProfileError::NonImageAvatar { .. } => None,
         }
     }
 }
@@ -117,6 +128,9 @@ impl From<std::io::Error> for UserProfileDownloadError {
 }
 
 /// Fetches the avatar via [`UserProfile::fetch_avatar`] and writes it at `dest`.
+///
+/// # Errors
+/// Fails when the avatar cannot be fetched or written.
 pub fn download_avatar(
     provider: &impl UserProfile,
     dest: &Path,

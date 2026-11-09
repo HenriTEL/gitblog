@@ -84,14 +84,19 @@ impl Error for UpdateProfileError {
             UpdateProfileError::GitUrl(e) => Some(e),
             UpdateProfileError::RepoUri(e) => Some(e),
             UpdateProfileError::Download(e) => Some(e),
-            _ => None,
+            UpdateProfileError::RemoteLookup(_)
+            | UpdateProfileError::UnsupportedRepositoryScheme(_)
+            | UpdateProfileError::UnsupportedHost(_)
+            | UpdateProfileError::NoRemote
+            | UpdateProfileError::NonUtf8RepoPath
+            | UpdateProfileError::MissingRepoOwner => None,
         }
     }
 }
 
 /// Fetch profile picture and metadata for the Git hosting implied by `repo_uri` (currently only
 /// [GitHub](https://github.com)) and writes the avatar under `dest/media/avatar`.
-pub fn update_profile(
+fn update_profile(
     repo_uri: &str,
     dest: impl AsRef<Path>,
     force_full: bool,
@@ -100,7 +105,7 @@ pub fn update_profile(
 
     match url.scheme {
         gix::url::Scheme::Http | gix::url::Scheme::Https | gix::url::Scheme::Ssh => {}
-        s => {
+        s @ (gix::url::Scheme::File | gix::url::Scheme::Git | gix::url::Scheme::Ext(_)) => {
             return Err(UpdateProfileError::UnsupportedRepositoryScheme(
                 s.to_string(),
             ));
@@ -151,7 +156,7 @@ fn base_social_accounts() -> HashMap<String, String> {
 }
 
 /// Resolve the fetch remote URL from git config and update the profile when it points at GitHub.
-pub fn update_profile_for_local_repo(
+fn update_profile_for_local_repo(
     repo: &gix::Repository,
     branch: Option<&str>,
     dest: impl AsRef<Path>,
@@ -159,8 +164,7 @@ pub fn update_profile_for_local_repo(
 ) -> Result<UserProfileMeta, UpdateProfileError> {
     match resolve_fetch_remote_url(repo, branch)? {
         Some(url) if matches!(url.scheme, Scheme::Http | Scheme::Https | Scheme::Ssh) => {
-            let uri = url.to_bstring().to_string();
-            update_profile(&uri, dest, force_full)
+            update_profile(&url.to_bstring().to_string(), dest, force_full)
         }
         Some(url) => Err(UpdateProfileError::UnsupportedRepositoryScheme(
             url.scheme.to_string(),
@@ -232,8 +236,8 @@ fn fallback_local_profile(repo: &gix::Repository) -> UserProfileMeta {
     let username = repo
         .worktree()
         .map(|wt| wt.base().to_path_buf())
-        .or_else(|| repo.path().parent().map(|p| p.to_path_buf()))
-        .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+        .or_else(|| repo.path().parent().map(std::path::Path::to_path_buf))
+        .and_then(|p| p.file_name().map(std::ffi::OsStr::to_os_string))
         .and_then(|n| n.into_string().ok())
         .unwrap_or_else(|| "blog".to_string());
     UserProfileMeta {
@@ -347,18 +351,8 @@ fn main() -> ExitCode {
         }
     };
 
-    if args.no_fetch && url.scheme != Scheme::File && args.clone_dir.is_none() {
-        eprintln!("--no-fetch with a remote repository requires --clone-dir");
-        return ExitCode::FAILURE;
-    }
-
-    if args.overwrite && args.output.is_none() {
-        eprintln!("--overwrite requires --output");
-        return ExitCode::FAILURE;
-    }
-
-    if args.clone_dir.is_some() && url.scheme == Scheme::File {
-        eprintln!("--clone-dir requires a remote repository");
+    if let Err(message) = validate_args(&args, &url) {
+        eprintln!("{message}");
         return ExitCode::FAILURE;
     }
 
@@ -382,18 +376,13 @@ fn main() -> ExitCode {
     let atom_feed = fetch_atom_feed(&args.blog_url);
     let (up_to, previous_feed) = if args.full {
         (MIN_UTC.fixed_offset(), atom_feed.ok())
+    } else if let Ok(feed) = atom_feed {
+        let updated = feed.updated;
+        (updated, Some(feed))
     } else {
-        match atom_feed {
-            Ok(feed) => {
-                let updated = feed.updated;
-                (updated, Some(feed))
-            }
-            Err(_) => {
-                log::error!("Failed to fetch atom feed from {}", args.blog_url);
-                log::info!("Falling back to full blog generation");
-                (MIN_UTC.fixed_offset(), None)
-            }
-        }
+        log::error!("Failed to fetch atom feed from {}", args.blog_url);
+        log::info!("Falling back to full blog generation");
+        (MIN_UTC.fixed_offset(), None)
     };
 
     let context = BuildContext {
@@ -405,8 +394,8 @@ fn main() -> ExitCode {
     };
 
     match url.scheme {
-        Scheme::Http | Scheme::Https | Scheme::Ssh => match args.clone_dir.as_ref() {
-            Some(clone_dir) => {
+        Scheme::Http | Scheme::Https | Scheme::Ssh => {
+            if let Some(clone_dir) = args.clone_dir.as_ref() {
                 if args.no_fetch {
                     if let Err(e) = gix::open(clone_dir) {
                         eprintln!("no usable clone at {}: {e}", clone_dir.display());
@@ -417,12 +406,11 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 build_from_local_repo(&context, clone_dir)
-            }
-            None => {
+            } else {
                 build_from_remote(&context, url);
                 ExitCode::SUCCESS
             }
-        },
+        }
         Scheme::File => match repo_uri::file_url_to_path(&url) {
             Ok(repo_root) => build_from_local_repo(&context, &repo_root),
             Err(e) => {
@@ -430,14 +418,26 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        ref scheme => {
-            eprintln!(
-                "The URL {} resolved to protocol {scheme} which is not supported.",
-                url
-            );
+        ref scheme @ (Scheme::Git | Scheme::Ext(_)) => {
+            eprintln!("The URL {url} resolved to protocol {scheme} which is not supported.");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Rejects option combinations that cannot work with the repository at `url`.
+fn validate_args(args: &CliArgs, url: &gix::Url) -> Result<(), &'static str> {
+    let is_local = url.scheme == Scheme::File;
+    if args.no_fetch && !is_local && args.clone_dir.is_none() {
+        return Err("--no-fetch with a remote repository requires --clone-dir");
+    }
+    if args.overwrite && args.output.is_none() {
+        return Err("--overwrite requires --output");
+    }
+    if args.clone_dir.is_some() && is_local {
+        return Err("--clone-dir requires a remote repository");
+    }
+    Ok(())
 }
 
 struct BuildContext<'a> {
@@ -497,7 +497,7 @@ fn build_from_remote(context: &BuildContext<'_>, url: gix::Url) {
     } else {
         profile_or_fallback(update_profile(&args.repo, &dest, args.full), fallback_name)
     };
-    finish_build(context, &dest, user_profile, updated_file_blobs);
+    finish_build(context, &dest, user_profile, &updated_file_blobs);
 }
 
 fn build_from_local_repo(context: &BuildContext<'_>, repo_root: &Path) -> ExitCode {
@@ -565,7 +565,7 @@ fn build_from_local_repo(context: &BuildContext<'_>, repo_root: &Path) -> ExitCo
             fallback_name,
         )
     };
-    finish_build(context, &dest, user_profile, updated_file_blobs);
+    finish_build(context, &dest, user_profile, &updated_file_blobs);
     ExitCode::SUCCESS
 }
 
@@ -679,7 +679,7 @@ fn finish_build(
     context: &BuildContext<'_>,
     dest: &Path,
     user_profile: UserProfileMeta,
-    updated_file_blobs: Vec<git::FileBlob>,
+    updated_file_blobs: &[git::FileBlob],
 ) {
     let args = context.args;
     if let Err(e) = install_blog_templates(dest) {
@@ -688,7 +688,7 @@ fn finish_build(
     let user_profile = profile_for_output(user_profile, dest);
     refresh_blog_posts_from_markdown(
         dest,
-        &updated_file_blobs,
+        updated_file_blobs,
         args.full,
         &args.frontmatter_delimiter,
     );
@@ -717,7 +717,7 @@ fn finish_build(
         println!("wrote index.gmi");
     }
     if context.is_full() || updated_file_blobs.is_empty() {
-        write_static_content(dest);
+        write_static_content(dest).expect("write static content");
     }
     println!("Blog built at {} ", dest.display());
 }
@@ -794,18 +794,11 @@ fn collect_updated_file_blobs(
                 return None;
             }
             match (state, maybe_oid) {
-                (State::Created, Some(oid)) => Some(gitblog::git::FileBlob {
+                (State::Created | State::Modified, Some(oid)) => Some(gitblog::git::FileBlob {
                     file_path: path.clone(),
                     oid: oid.to_owned(),
                 }),
-                (State::Deleted, None) => None,
-                (State::Modified, Some(oid)) => Some(gitblog::git::FileBlob {
-                    file_path: path.clone(),
-                    oid: oid.to_owned(),
-                }),
-                (State::Created, None) => None,
-                (State::Deleted, Some(_)) => None,
-                (State::Modified, None) => None,
+                (State::Deleted, _) | (_, None) => None,
             }
         })
         .collect::<Vec<_>>()
@@ -866,26 +859,17 @@ fn refresh_blog_posts_from_markdown(
         walk_markdown_files(dest, &mut |abs, rel| {
             let md = std::fs::read_to_string(abs).expect("read markdown");
             let ts = gitblog::blog_post::get_by_path(rel)
-                .map(|p| p.last_updated)
-                .unwrap_or_else(|| file_last_updated(abs));
-            git::update_blog_post_from_markdown_path(
-                rel.to_path_buf(),
-                &md,
-                ts,
-                frontmatter_delimiter,
-            );
+                .map_or_else(|| file_last_updated(abs), |p| p.last_updated);
+            git::update_blog_post_from_markdown_path(rel, &md, ts, frontmatter_delimiter);
         });
         return;
     }
 
     for blob in blobs {
+        if !gitblog::is_post_source(&blob.file_path) {
+            continue;
+        }
         let markdown_path = dest.join(&blob.file_path);
-        if !markdown_path.extension().is_some_and(|e| e == "md") {
-            continue;
-        }
-        if markdown_is_ignored(&blob.file_path) {
-            continue;
-        }
         let md = std::fs::read_to_string(&markdown_path).expect("read markdown");
         git::update_blog_post_from_markdown(&blob.oid, &md, frontmatter_delimiter);
     }
@@ -928,15 +912,11 @@ fn source_path_from_entry_url(blog_url: &str, entry_url: &str) -> std::path::Pat
     };
     let mut path = std::path::PathBuf::from(rel);
     match path.extension().and_then(|e| e.to_str()) {
-        Some("html") => {
+        Some("html") | None => {
             path.set_extension("md");
             path
         }
         Some(_) => path,
-        None => {
-            path.set_extension("md");
-            path
-        }
     }
 }
 
@@ -944,7 +924,6 @@ fn file_last_updated(path: &Path) -> DateTime<FixedOffset> {
     std::fs::metadata(path)
         .ok()
         .and_then(|meta| meta.modified().ok())
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(Utc::now)
+        .map_or_else(Utc::now, DateTime::<Utc>::from)
         .fixed_offset()
 }

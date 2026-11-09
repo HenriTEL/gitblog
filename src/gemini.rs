@@ -4,6 +4,10 @@ use crate::blog_post::{BlogPost, fallback_title};
 use crate::markdown::article_render_parts;
 use crate::markdown_extensions::{is_markup_only_line, strip_trailing_attr_list};
 
+/// Writes the `.gmi` version of the Markdown file next to it.
+///
+/// # Errors
+/// Fails when the Markdown file cannot be read or the output cannot be written.
 pub fn markdown_file_to_gemtext(
     markdown_path: &Path,
     frontmatter_delimiter: &str,
@@ -22,6 +26,7 @@ pub fn markdown_file_to_gemtext(
     std::fs::write(output_path, gemtext)
 }
 
+#[must_use]
 pub fn markdown_to_gemtext(markdown: &str) -> String {
     let mut output = String::new();
     let mut in_code_block = false;
@@ -117,6 +122,10 @@ pub fn markdown_to_gemtext(markdown: &str) -> String {
     output
 }
 
+/// Writes `index.gmi` listing `blog_posts` under `dest`.
+///
+/// # Errors
+/// Fails when the file cannot be written.
 pub fn write_index_gemtext(dest: &Path, blog_posts: &[BlogPost]) -> std::io::Result<()> {
     let mut posts = blog_posts.to_vec();
     posts.sort_by(|a, b| {
@@ -209,13 +218,13 @@ fn replace_inline_markdown_links(line: &str) -> String {
         let url_start = close_bracket_idx + 2;
         let url_end = close_bracket_idx + 1 + close_paren_rel;
         let url = &line[url_start..url_end];
-        if !url.is_empty() {
+        if url.is_empty() {
+            out.push_str(label);
+        } else {
             out.push_str(label);
             out.push_str(" (");
             out.push_str(url);
             out.push(')');
-        } else {
-            out.push_str(label);
         }
         idx = url_end + 1;
     }

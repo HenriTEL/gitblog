@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use html5ever::{
-    Attribute, ExpandedName, QualName, local_name, parse_document,
+    Attribute, ExpandedName, ParseOpts, QualName, local_name, parse_document,
     tendril::{StrTendril, TendrilSink},
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
 };
@@ -259,7 +259,10 @@ impl GithubUserProfile {
     }
 
     fn profile_html(&self) -> Result<String, UserProfileError> {
-        let mut guard = self.profile_html.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .profile_html
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref cached) = *guard {
             return Ok(cached.clone());
         }
@@ -275,14 +278,14 @@ impl GithubUserProfile {
 }
 
 fn parse_github_meta(html: &str) -> (Option<String>, Option<String>, Option<String>) {
-    parse_document(MetaExtractSink::new(), Default::default())
+    parse_document(MetaExtractSink::new(), ParseOpts::default())
         .one(html)
         .finish()
         .into_github_metas()
 }
 
 fn parse_github_social_accounts(html: &str) -> Vec<(String, String)> {
-    parse_document(MetaExtractSink::new(), Default::default())
+    parse_document(MetaExtractSink::new(), ParseOpts::default())
         .one(html)
         .finish()
         .into_social_accounts()

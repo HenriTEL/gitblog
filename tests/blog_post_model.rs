@@ -43,10 +43,13 @@ fn builds_atom_feed_from_blog_posts() {
     assert_eq!(feed.entries.len(), 2);
     assert_eq!(feed.updated.to_rfc3339(), "2026-04-02T10:00:00+02:00");
     assert_eq!(
-        feed.entries[0].link.href,
+        feed.entries.first().expect("first entry").link.href,
         "https://example.com/blog/notes/second.html"
     );
-    assert_eq!(feed.entries[1].summary, "Summary one");
+    assert_eq!(
+        feed.entries.get(1).expect("second entry").summary,
+        "Summary one"
+    );
 
     let xml = generate(&feed).expect("atom xml generation");
     assert!(xml.contains("<published>2026-04-02T10:00:00+02:00</published>"));

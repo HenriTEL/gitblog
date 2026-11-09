@@ -8,7 +8,7 @@ use super::{site_has_icon, write_static_content};
 fn creates_media_dir_when_the_blog_has_none() {
     let dir = tempdir().unwrap();
 
-    write_static_content(dir.path());
+    write_static_content(dir.path()).unwrap();
 
     assert!(dir.path().join("media/favicon.svg").is_file());
     assert!(dir.path().join("media/icons.svg").is_file());
@@ -21,7 +21,7 @@ fn keeps_the_blogs_own_favicon() {
     fs::create_dir_all(dir.path().join("media")).unwrap();
     fs::write(dir.path().join("media/favicon.svg"), "<svg id=\"mine\"/>").unwrap();
 
-    write_static_content(dir.path());
+    write_static_content(dir.path()).unwrap();
 
     assert_eq!(
         fs::read_to_string(dir.path().join("media/favicon.svg")).unwrap(),
@@ -35,7 +35,7 @@ fn custom_stylesheets_replace_the_bundled_ones() {
     fs::create_dir_all(dir.path().join("css")).unwrap();
     fs::write(dir.path().join("css/theme.css"), "/* my-theme */").unwrap();
 
-    write_static_content(dir.path());
+    write_static_content(dir.path()).unwrap();
 
     let style = fs::read_to_string(dir.path().join("style.css")).unwrap();
     assert!(style.contains("/* my-theme */"));

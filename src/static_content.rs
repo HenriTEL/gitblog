@@ -16,13 +16,16 @@ const MEDIAS: &[(&str, &str)] = &[
 
 /// Adds the bundled media the blog does not provide itself and writes `style.css`, using the blog's
 /// own `css/theme.css` and `css/layout.css` in place of the bundled ones when present.
-pub fn write_static_content(dest: &Path) {
+///
+/// # Errors
+/// Fails when a file cannot be written under `dest`.
+pub fn write_static_content(dest: &Path) -> std::io::Result<()> {
     let media_dir = dest.join("media");
-    fs::create_dir_all(&media_dir).unwrap();
+    fs::create_dir_all(&media_dir)?;
     for (name, content) in MEDIAS {
         let path = media_dir.join(name);
         if !path.exists() {
-            fs::write(path, content).unwrap();
+            fs::write(path, content)?;
         }
     }
 
@@ -32,7 +35,7 @@ pub fn write_static_content(dest: &Path) {
         stylesheet_or_default(dest, "layout.css", LAYOUT),
     ]
     .concat();
-    fs::write(dest.join("style.css"), style_sheet).unwrap();
+    fs::write(dest.join("style.css"), style_sheet)
 }
 
 fn stylesheet_or_default(dest: &Path, name: &str, default: &str) -> String {

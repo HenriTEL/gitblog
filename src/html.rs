@@ -64,6 +64,12 @@ fn resolve_article_dates(
 }
 
 /// Renders the site index (`index.html.j2`).
+///
+/// # Errors
+/// Fails when the template cannot be rendered.
+///
+/// # Panics
+/// Panics when the page context cannot be serialized.
 pub fn render_index_html(
     tera: &Tera,
     title: String,
@@ -71,7 +77,7 @@ pub fn render_index_html(
     blog_posts: Vec<RenderBlogPost>,
     sections: Vec<String>,
     avatar_url: Option<String>,
-    social_accounts: HashMap<String, String>,
+    social_accounts: impl IntoIterator<Item = (String, String)>,
 ) -> Result<String, tera::Error> {
     let ctx = IndexPageContext {
         title,
@@ -79,7 +85,7 @@ pub fn render_index_html(
         blog_posts,
         sections,
         avatar_url,
-        social_accounts,
+        social_accounts: social_accounts.into_iter().collect(),
     };
     tera.render(
         "index.html.j2",
@@ -165,6 +171,9 @@ pub fn write_index_from_blog_posts(
 }
 
 /// Converts a Markdown file to a full HTML page using the embedded article template.
+///
+/// # Panics
+/// Panics when the Markdown file cannot be read or the page cannot be rendered or written.
 pub fn markdown_file_to_html(
     user_profile: &UserProfileMeta,
     markdown_path: &Path,

@@ -73,7 +73,7 @@ fn init_git_repo(path: &Path) {
     };
     let commit = gix::objs::Commit {
         tree: empty_tree,
-        parents: Default::default(),
+        parents: std::iter::empty().collect(),
         author: sig.to_owned(),
         committer: sig.to_owned(),
         message: "init".into(),
@@ -379,9 +379,11 @@ fn collect_updated_file_blobs_skips_ignored_paths() {
 
     let blobs = collect_updated_file_blobs(&diff);
 
-    assert_eq!(blobs.len(), 1);
-    assert_eq!(blobs[0].file_path, PathBuf::from("posts/hello.md"));
-    assert_eq!(blobs[0].oid, keep_oid);
+    let [blob] = blobs.as_slice() else {
+        panic!("expected exactly one blob");
+    };
+    assert_eq!(blob.file_path, PathBuf::from("posts/hello.md"));
+    assert_eq!(blob.oid, keep_oid);
 }
 
 #[test]

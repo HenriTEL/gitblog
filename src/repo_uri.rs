@@ -27,7 +27,7 @@ impl std::error::Error for RepoUriError {
         match self {
             RepoUriError::Parse(e) => Some(e),
             RepoUriError::Io(e) => Some(e),
-            _ => None,
+            RepoUriError::NotFileScheme => None,
         }
     }
 }
@@ -45,6 +45,9 @@ fn has_remote_scheme_prefix(repo: &str) -> bool {
 }
 
 /// Parse `repo` as a remote Git URL or as a local path (always yielding [`Scheme::File`]).
+///
+/// # Errors
+/// Fails when `repo` is not a valid URL or the path cannot be resolved.
 pub fn parse_repo_url(repo: &str) -> Result<gix::Url, RepoUriError> {
     if has_remote_scheme_prefix(repo) {
         return gix::Url::from_bytes(BStr::new(repo.as_bytes())).map_err(RepoUriError::Parse);
@@ -78,6 +81,9 @@ pub fn parse_repo_url(repo: &str) -> Result<gix::Url, RepoUriError> {
 }
 
 /// Filesystem path for a [`Scheme::File`] URL.
+///
+/// # Errors
+/// Fails when `url` does not use the file scheme or its path cannot be converted.
 pub fn file_url_to_path(url: &gix::Url) -> Result<PathBuf, RepoUriError> {
     if url.scheme != Scheme::File {
         return Err(RepoUriError::NotFileScheme);

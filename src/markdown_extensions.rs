@@ -519,7 +519,7 @@ fn render_markdown_html_block(
     let rendered = if is_span {
         unwrap_single_paragraph_html(&rendered)
     } else {
-        format!("\n{}", rendered)
+        format!("\n{rendered}")
     };
     let before = captures.get(2).map_or("", |m| m.as_str());
     let after = captures.get(6).map_or("", |m| m.as_str()).trim_end();

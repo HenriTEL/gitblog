@@ -373,8 +373,8 @@ fn applying_uncommitted_changes_updates_files_and_dates_articles_now() {
     let edited = blog_post::get_by_path(Path::new("edited.md")).expect("edited");
     assert_eq!(edited.last_updated, now);
     assert_eq!(edited.publication_date, Some(committed));
-    let new = blog_post::get_by_path(Path::new("new.md")).expect("new");
-    assert_eq!(new.effective_publication_date(), now);
+    let new_post = blog_post::get_by_path(Path::new("new.md")).expect("new");
+    assert_eq!(new_post.effective_publication_date(), now);
     let staged = blog_post::get_by_path(Path::new("section/staged.md")).expect("staged");
     assert_eq!(staged.last_updated, now);
 }
