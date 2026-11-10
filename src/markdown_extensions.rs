@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use comrak::nodes::{AstNode, NodeValue};
+use comrak::nodes::{AstNode, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options, format_html, parse_document};
 use regex::Regex;
 
@@ -15,7 +15,7 @@ use crate::markdown::{
     render_markdown_to_html, strip_html_tags_collapse_ws, unwrap_single_paragraph_html,
 };
 
-const TOC_MARKER: &str = "<p>[TOC]</p>";
+const TOC_PLACEHOLDER: &str = "<!--gitblog-toc-->";
 const TOC_TITLE: &str = "Table of contents";
 const ATTR_PLACEHOLDER: &str = "<!--gitblog-attr-";
 const ATTR_BODY: &str = r"\{(?::[ ]*([^{}\n]+?)|[ ]*([#.][^{}\n]*?))[ ]*\}";
@@ -27,6 +27,8 @@ const SPAN_LEVEL_TAGS: &[&str] = &[
     "td", "th",
 ];
 
+static TOC_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*\[\s*toc\s*\]\s*$").expect("toc regex"));
 static ABBREVIATION_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^ {0,3}\*\[([^\]\n]+)\]:[ \t]*(.*?)[ \t]*$").expect("abbr regex")
 });
@@ -57,6 +59,7 @@ pub(crate) fn render(markdown: &str, options: &Options) -> String {
     let arena = Arena::new();
     let root = parse_document(&arena, &markdown, options);
     let attr_lists = mark_attr_lists(&arena, root);
+    mark_toc_tokens(&arena, root);
     if let Some(abbreviations) = &abbreviations {
         apply_abbreviations(&arena, root, abbreviations);
     }
@@ -71,7 +74,7 @@ pub(crate) fn render(markdown: &str, options: &Options) -> String {
 
 /// Whether a source line only carries markup of this module, with no content of its own.
 pub(crate) fn is_markup_only_line(line: &str) -> bool {
-    line == "[TOC]" || ABBREVIATION_LINE.is_match(line) || ATTR_WHOLE.is_match(line)
+    TOC_TOKEN.is_match(line) || ABBREVIATION_LINE.is_match(line) || ATTR_WHOLE.is_match(line)
 }
 
 /// `line` without a trailing attribute list.
@@ -555,8 +558,67 @@ fn restore_markdown_html_blocks(mut html: String, blocks: &[String]) -> String {
     html
 }
 
+/// Whether `node` is a text node holding nothing but the `[TOC]` token on its line.
+fn is_toc_line(node: &AstNode<'_>) -> bool {
+    let is_line_edge = |sibling: Option<&AstNode<'_>>| {
+        sibling.is_none_or(|n| {
+            matches!(
+                n.data.borrow().value,
+                NodeValue::SoftBreak | NodeValue::LineBreak
+            )
+        })
+    };
+    node_text(node).is_some_and(|text| TOC_TOKEN.is_match(&text))
+        && is_line_edge(node.previous_sibling())
+        && is_line_edge(node.next_sibling())
+}
+
+/// Replaces each `[TOC]` line with a placeholder block, splitting its paragraph around it.
+fn mark_toc_tokens<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
+    let paragraphs: Vec<_> = root
+        .descendants()
+        .filter(|n| matches!(n.data.borrow().value, NodeValue::Paragraph))
+        .collect();
+    for paragraph in paragraphs {
+        let mut current = paragraph;
+        while let Some(token) = current.children().find(|n| is_toc_line(n)) {
+            let rest = new_node(arena, NodeValue::Paragraph);
+            let mut next = token.next_sibling().and_then(|line_break| {
+                let after_break = line_break.next_sibling();
+                line_break.detach();
+                after_break
+            });
+            while let Some(node) = next {
+                next = node.next_sibling();
+                rest.append(node);
+            }
+            if let Some(line_break) = token.previous_sibling() {
+                line_break.detach();
+            }
+            token.detach();
+
+            let placeholder = new_node(
+                arena,
+                NodeValue::HtmlBlock(NodeHtmlBlock {
+                    block_type: 0,
+                    literal: format!("{TOC_PLACEHOLDER}\n"),
+                }),
+            );
+            current.insert_after(placeholder);
+            placeholder.insert_after(rest);
+            if current.first_child().is_none() {
+                current.detach();
+            }
+            current = rest;
+        }
+        if current.first_child().is_none() {
+            current.detach();
+        }
+    }
+}
+
 fn insert_table_of_contents(html: String) -> String {
-    if !html.contains(TOC_MARKER) {
+    if !html.contains(TOC_PLACEHOLDER) {
         return html;
     }
     let mut list = String::new();
@@ -582,7 +644,7 @@ fn insert_table_of_contents(html: String) -> String {
     list.push_str(&"</li></ul>".repeat(open_levels.len()));
     let table =
         format!("<div class=\"toc\"><span class=\"toctitle\">{TOC_TITLE}</span>{list}</div>");
-    html.replace(TOC_MARKER, &table)
+    html.replace(TOC_PLACEHOLDER, &table)
 }
 
 #[cfg(test)]

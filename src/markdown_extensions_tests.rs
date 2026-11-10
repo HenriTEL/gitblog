@@ -63,6 +63,90 @@ fn toc_marker_in_code_is_left_alone() {
 }
 
 #[test]
+fn toc_token_accepts_case_and_whitespace_variations() {
+    for token in [
+        "[TOC]",
+        "[toc]",
+        "[Toc]",
+        "[tOc]",
+        "[ TOC ]",
+        "[  toc]",
+        "[toc  ]",
+        "[\ttoc\t]",
+        "   [TOC]",
+        "[TOC]   ",
+        "  [ ToC ]  ",
+    ] {
+        let html = render(&format!("{token}\n\n## One\n"));
+        assert!(html.contains("toctitle"), "{token:?}: {html}");
+        assert!(
+            html.contains(r##"<a href="#one">One</a>"##),
+            "{token:?}: {html}"
+        );
+        assert!(!html.to_lowercase().contains("toc]"), "{token:?}: {html}");
+        assert!(!html.contains("<p>"), "{token:?}: {html}");
+    }
+}
+
+#[test]
+fn toc_token_on_its_own_line_splits_the_paragraph_around_it() {
+    let html = render("Before\n[ toc ]\nAfter\n\n## One\n");
+    let before = html.find("<p>Before</p>").expect(&html);
+    let table = html.find("toctitle").expect(&html);
+    let after = html.find("<p>After</p>").expect(&html);
+    assert!(before < table && table < after, "{html}");
+}
+
+#[test]
+fn toc_token_at_a_paragraph_edge_leaves_no_empty_paragraph() {
+    for markdown in ["[TOC]\nAfter\n\n## One\n", "Before\n[TOC]\n\n## One\n"] {
+        let html = render(markdown);
+        assert!(html.contains("toctitle"), "{html}");
+        assert!(!html.contains("<p></p>"), "{html}");
+    }
+}
+
+#[test]
+fn every_toc_token_is_replaced_even_after_a_hard_line_break() {
+    let html = render("[TOC]  \nBetween\n[toc]\n\n## One\n");
+    assert_eq!(html.matches("toctitle").count(), 2, "{html}");
+    assert!(html.contains("<p>Between</p>"), "{html}");
+}
+
+#[test]
+fn toc_token_works_in_lists_and_quotes() {
+    for markdown in ["- [toc]\n\n## One\n", "> [ TOC ]\n\n## One\n"] {
+        let html = render(markdown);
+        assert!(html.contains("toctitle"), "{html}");
+        assert!(!html.to_lowercase().contains("toc]"), "{html}");
+    }
+}
+
+#[test]
+fn toc_token_is_found_when_it_is_also_a_defined_abbreviation() {
+    let html = render("[TOC]\n\n*[TOC]: Table of contents\n\n## One\n");
+    assert!(html.contains("toctitle"), "{html}");
+}
+
+#[test]
+fn text_that_is_not_a_lone_toc_token_is_left_alone() {
+    for markdown in [
+        "See [TOC] for details\n\n## One\n",
+        "[TOC].\n\n## One\n",
+        "[TOCS]\n\n## One\n",
+        "[T O C]\n\n## One\n",
+        "    [TOC]\n\n## One\n",
+        "```\n[toc]\n```\n\n## One\n",
+        "`[ toc ]`\n\n## One\n",
+        "## [TOC]\n",
+        "[toc]\n\n[toc]: https://example.com\n\n## One\n",
+    ] {
+        let html = render(markdown);
+        assert!(!html.contains("toctitle"), "{markdown:?}: {html}");
+    }
+}
+
+#[test]
 fn heading_attr_list_sets_id_used_by_toc_and_class() {
     let html = render("[TOC]\n\n## Title {: #custom .big data-x=\"1 2\" }\n");
     assert!(html.contains(r#"<h2 data-x="1 2" class="big">"#), "{html}");

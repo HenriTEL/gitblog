@@ -62,3 +62,18 @@ fn icon_lookup_prefers_the_blogs_own_sprite() {
     assert!(site_has_icon(dir.path(), "bluesky"));
     assert!(!site_has_icon(dir.path(), "github"));
 }
+
+#[test]
+fn bundled_stylesheet_styles_every_alert_type() {
+    let dir = tempdir().unwrap();
+
+    write_static_content(dir.path()).unwrap();
+
+    let style = fs::read_to_string(dir.path().join("style.css")).unwrap();
+    for class in ["tip", "important", "warning", "caution", "title"] {
+        assert!(
+            style.contains(&format!(".markdown-alert-{class}")),
+            "{class}"
+        );
+    }
+}

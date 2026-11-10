@@ -1,7 +1,8 @@
 use chrono::{Datelike, Timelike};
 
 use super::{
-    article_render_parts, parse_content_metadata, parse_title_and_summary, render_markdown_to_html,
+    alert_title, article_render_parts, parse_content_metadata, parse_title_and_summary,
+    render_markdown_to_html,
 };
 
 #[test]
@@ -168,4 +169,63 @@ fn article_render_parts_keeps_first_paragraph_in_main_when_not_tldr() {
     let p = article_render_parts(md, "fallback", "");
     assert_eq!(p.summary_markdown, "");
     assert!(p.body_markdown.contains("Intro without keyword"));
+}
+
+#[test]
+fn all_alert_types_render_with_their_own_class_and_title() {
+    for (kind, title) in [
+        ("NOTE", "Note"),
+        ("TIP", "Tip"),
+        ("IMPORTANT", "Important"),
+        ("WARNING", "Warning"),
+        ("CAUTION", "Caution"),
+    ] {
+        let html = render_markdown_to_html(&format!("> [!{kind}]\n> Body\n"), "---");
+        let class = format!("markdown-alert-{}", kind.to_lowercase());
+        assert!(html.contains(&class), "{html}");
+        assert!(
+            html.contains(&format!(r#"<p class="markdown-alert-title">{title}</p>"#)),
+            "{html}"
+        );
+    }
+}
+
+#[test]
+fn alert_title_follows_the_same_rule_as_the_renderer() {
+    assert_eq!(alert_title("> [!NOTE]").as_deref(), Some("Note"));
+    assert_eq!(alert_title("> [!warning]").as_deref(), Some("Warning"));
+    assert_eq!(
+        alert_title("> [!tip] Read this  ").as_deref(),
+        Some("Read this")
+    );
+    for not_an_alert in [
+        "> [!UNKNOWN]",
+        ">[!NOTE]",
+        ">  [!NOTE]",
+        "[!NOTE]",
+        "> text",
+    ] {
+        assert_eq!(alert_title(not_an_alert), None, "{not_an_alert}");
+        let html = render_markdown_to_html(&format!("{not_an_alert}\n"), "---");
+        assert!(!html.contains("markdown-alert"), "{not_an_alert}: {html}");
+    }
+}
+
+#[test]
+fn alert_under_the_title_stays_in_the_body_instead_of_becoming_the_summary() {
+    let markdown = "# Title\n\n> [!WARNING]\n> Careful.\n\nBody\n";
+
+    let parts = article_render_parts(markdown, "fallback", "---");
+    assert_eq!(parts.summary_markdown, "");
+    assert!(parts.body_markdown.contains("> [!WARNING]"), "{parts:?}");
+
+    let (_, summary) = parse_title_and_summary(markdown, "fallback");
+    assert_eq!(summary, "");
+}
+
+#[test]
+fn plain_quote_under_the_title_is_still_the_summary() {
+    let parts = article_render_parts("# Title\n\n> A lede.\n\nBody\n", "fallback", "---");
+    assert_eq!(parts.summary_markdown, "A lede.");
+    assert!(!parts.body_markdown.contains("A lede."), "{parts:?}");
 }

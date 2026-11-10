@@ -1,6 +1,13 @@
+use std::sync::LazyLock;
+
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use regex::Regex;
 
 use crate::markdown_extensions;
+
+static ALERT_START: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^> \[!(note|tip|important|warning|caution)\](.*)$").expect("alert regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
@@ -93,13 +100,9 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
         return (title, String::new());
     };
 
-    let quote_lines: Vec<&str> = lines
-        .iter()
-        .copied()
-        .skip(start)
-        .skip_while(|line| line.trim().is_empty())
-        .map_while(blockquote_text)
-        .collect();
+    let quote_lines = first_non_blank(&lines, start).map_or_else(Vec::new, |(quote_start, _)| {
+        summary_blockquote(&lines, quote_start)
+    });
 
     (title, quote_lines.join("\n"))
 }
@@ -108,6 +111,34 @@ pub fn parse_title_and_summary(markdown: &str, fallback: &str) -> (String, Strin
 fn blockquote_text(line: &str) -> Option<&str> {
     let rest = line.trim().strip_prefix('>')?;
     Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
+/// De-quoted lines of the blockquote starting at line `start`; none when it is an alert, which
+/// is content of its own rather than a summary of the post.
+fn summary_blockquote<'a>(lines: &[&'a str], start: usize) -> Vec<&'a str> {
+    if lines
+        .get(start)
+        .is_some_and(|line| alert_title(line).is_some())
+    {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .copied()
+        .skip(start)
+        .map_while(blockquote_text)
+        .collect()
+}
+
+/// Heading of the alert that `line` opens, by comrak's rule; `None` for any other line.
+pub(crate) fn alert_title(line: &str) -> Option<String> {
+    let alert = ALERT_START.captures(line.trim())?;
+    let title = alert[2].trim();
+    if !title.is_empty() {
+        return Some(title.to_string());
+    }
+    let kind = alert[1].to_lowercase();
+    Some(format!("{}{}", kind[..1].to_uppercase(), &kind[1..]))
 }
 
 /// Index and text of the first non-blank line at or after `from`.
@@ -197,12 +228,7 @@ fn parse_body_intro(
     };
 
     if intro_line.trim_start().starts_with('>') {
-        let dequoted: Vec<&str> = lines
-            .iter()
-            .copied()
-            .skip(start)
-            .map_while(blockquote_text)
-            .collect();
+        let dequoted = summary_blockquote(lines, start);
         if dequoted.is_empty() {
             return (body_title, h1_idx, BodySummaryKind::None);
         }

@@ -14,6 +14,11 @@
 	--highlight: hwb(60 0% 0%);
 	--text-highlight: black;
 	--link: initial;
+	--alert-note: hwb(212deg 4% 15%);
+	--alert-tip: hwb(137deg 10% 50%);
+	--alert-important: hwb(261deg 31% 13%);
+	--alert-warning: hwb(40deg 0% 40%);
+	--alert-caution: hwb(356deg 14% 18%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,6 +29,11 @@
 		--text-muted: hwb(0deg 60% 40%);
 		--highlight: hwb(60 0% 20%);
 		--link: hwb(200, 10%, 5%);
+		--alert-note: hwb(214deg 27% 3%);
+		--alert-tip: hwb(128deg 25% 27%);
+		--alert-important: hwb(262deg 49% 3%);
+		--alert-warning: hwb(41deg 13% 18%);
+		--alert-caution: hwb(3deg 29% 3%);
 	}
 
 	img,
@@ -121,6 +131,33 @@ blockquote>footer {
 
 blockquote cite {
 	font-style: normal;
+}
+
+.markdown-alert {
+	--alert-color: var(--alert-note);
+	border-left: 4px solid var(--alert-color);
+}
+
+.markdown-alert-tip {
+	--alert-color: var(--alert-tip);
+}
+
+.markdown-alert-important {
+	--alert-color: var(--alert-important);
+}
+
+.markdown-alert-warning {
+	--alert-color: var(--alert-warning);
+}
+
+.markdown-alert-caution {
+	--alert-color: var(--alert-caution);
+}
+
+.markdown-alert-title {
+	color: var(--alert-color);
+	font-family: var(--sans-serif);
+	font-weight: 600;
 }
 
 address {
